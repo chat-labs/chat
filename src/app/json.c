@@ -696,30 +696,46 @@ static chat_t *json_start(const js_value *v, const options_t *opts) {
     chat_opts_t o;
     memset(&o, 0, sizeof o);
     copy_str(o.nick, g_app.nick, sizeof o.nick);
-    const char *room = jstr(v, "room"), *password = jstr(v, "password");
-    if (!room && opts->session[0]) room = opts->session;
-    o.created = jbool(v, "create", !room);
-    if (room) copy_str(o.session_name, room, sizeof o.session_name);
-    else random_session_id(o.session_name, SESSION_ID_LEN);
-    if (password) {
-        copy_str(o.password, password, sizeof o.password);
-    } else if (platform_env_take("CHAT_PASSWORD", o.password, sizeof o.password) != 0 && o.created) {
-        // As the NEW box suggests one: the id is often passed around in the open.
-        uint8_t pw[MOVE_PASSWORD_BYTES];
-        gen_random(pw, sizeof pw);
-        bytewords_plain(pw, sizeof pw, o.password);
-        crypto_wipe(pw, sizeof pw);
+    const char *room = jstr(v, "room"), *password = jstr(v, "password"), *invite = jstr(v, "invite");
+    if (invite) {
+        // Its check catches a mistyped or cut off invite, instead of joining some other room.
+        int r = chat_invite_parse(invite, o.session_name, o.password);
+        if (r != 1) {
+            crypto_wipe(&o, sizeof o);
+            say_error(r == 0 ? "\"invite\" isn't an invite (chat:ID:PASSWORD:CHECK)" : "\"invite\" is mistyped or cut off");
+            return NULL;
+        }
+        o.created = jbool(v, "create", 0);
+    } else {
+        if (!room && opts->session[0]) room = opts->session;
+        o.created = jbool(v, "create", !room);
+        if (room) copy_str(o.session_name, room, sizeof o.session_name);
+        else random_session_id(o.session_name, SESSION_ID_LEN);
+        if (password) {
+            copy_str(o.password, password, sizeof o.password);
+        } else if (platform_env_take("CHAT_PASSWORD", o.password, sizeof o.password) != 0 && o.created) {
+            // As the NEW box suggests one: the id is often passed around in the open.
+            uint8_t pw[MOVE_PASSWORD_BYTES];
+            gen_random(pw, sizeof pw);
+            bytewords_plain(pw, sizeof pw, o.password);
+            crypto_wipe(pw, sizeof pw);
+        }
     }
     long long port = jint(v, "port", opts->port);
-    if (port < 0 || port > UINT16_MAX) { say_error("\"port\" is 0 to 65535"); return NULL; }
-    o.port = (uint16_t)port;
     const js_value *peers = js_obj_get(v, "peers");
     int n_peers = peers && peers->type == JS_ARR ? (int)peers->n : opts->n_peers;
-    if (n_peers > 0 && g_app.route.mode == ROUTE_TOR) { say_error("\"peers\" can't be used with Tor routing"); return NULL; }
+    const char *why = port < 0 || port > UINT16_MAX ? "\"port\" is 0 to 65535"
+                      : n_peers > 0 && g_app.route.mode == ROUTE_TOR ? "\"peers\" can't be used with Tor routing" : NULL;
+    if (why) { crypto_wipe(&o, sizeof o); say_error("%s", why); return NULL; }
+    o.port = (uint16_t)port;
     sandbox_up();
     for (int i = 0; i < n_peers && o.n_peers < (int)COUNT_OF(o.peers); i++) {
         const char *hp = peers && peers->type == JS_ARR ? js_str(&peers->items[i]) : opts->peers[i];
-        if (!hp || addr_parse_hostport(hp, &o.peers[o.n_peers]) != 0) { say_error("can't use peer %s", hp ? hp : "(not text)"); return NULL; }
+        if (!hp || addr_parse_hostport(hp, &o.peers[o.n_peers]) != 0) {
+            crypto_wipe(&o, sizeof o);
+            say_error("can't use peer %s", hp ? hp : "(not text)");
+            return NULL;
+        }
         o.n_peers++;
     }
     o.route = g_app.route;

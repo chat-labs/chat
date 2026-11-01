@@ -51,6 +51,7 @@ A short session, `>` for what goes in and `<` for what comes out:
 | Field | Meaning |
 | --- | --- |
 | `room`, `password` | The room's id and password. Without `room`, chat makes a new one, and without `password` for a new room, a random one in words, as the NEW box does. Without either for a room you join, the password is `CHAT_PASSWORD`, or blank |
+| `invite` | An invite (`chat:ID:PASSWORD:CHECK`, as `:invite` gives it) in place of `room` and `password`. A mistyped or cut off one is an `error`, since its check doesn't match |
 | `create` | `true` for a new room (the default without `room`): it opens at once instead of waiting for someone to answer |
 | `nick`, `colour` | Your name and colour here (`"#rrggbb"` or a colour's name); random without them |
 | `route` | `mode` (`udp` or `tor`), `dht`, `ipv6`, `lan` and `portmap` (`false` turns each off), `nostr` (`off`, `fallback` or `always`), `relays` (a list of `wss://` addresses) and `tor`: `socks` and `control` (`host:port` of a running tor), `password` (its control port's `HashedControlPassword`; without it, its cookie), `launch` (`auto`, `always` or `never`, as `--tor-launch`) and `path` (the tor to start) |
