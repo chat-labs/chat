@@ -242,7 +242,7 @@ With `--simple`, `:set` only covers `nick`, `colour`, `notify`, `preview` and `n
 ## Updating
 
 `:update` in chat, or `chat --update` from the shell without opening chat, checks the
-[latest GitHub release](https://github.com/Vinnelle/chat/releases/latest). If it's newer than
+[latest GitHub release](https://github.com/chat-labs/chat/releases/latest). If it's newer than
 the build you're running, chat checks the release's `SHA256SUMS` has a valid signature from the
 release key built into chat, downloads the binary for your platform, checks its SHA-256 against
 `SHA256SUMS`, and replaces the executable in place. A release without a valid signature is
@@ -254,7 +254,7 @@ executable is in.
 
 Betas, the test builds of the next release, are opt-in: with `betas` on (`:set betas on`, or
 `--betas` for one run), `:update` and `chat --update` install the newest release on the
-[releases page](https://github.com/Vinnelle/chat/releases), betas included. A beta is signed
+[releases page](https://github.com/chat-labs/chat/releases), betas included. A beta is signed
 and checked the same way as a release. With `betas` off, a beta you're running stays until its
 release is out, and `:update` then takes you on to that.
 

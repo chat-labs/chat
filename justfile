@@ -299,7 +299,7 @@ reproduce version:
     trap 'rm -rf "$dir"' EXIT
     same=1
     for f in chat-linux-x86_64 chat-windows-x86_64.exe; do
-        curl -fsSL -o "$dir/$f" "https://github.com/Vinnelle/chat/releases/download/v$v/$f"
+        curl -fsSL -o "$dir/$f" "https://github.com/chat-labs/chat/releases/download/v$v/$f"
         mine=$(sha256sum < "dist/$f" | cut -c1-64)
         theirs=$("$just" _core-hash "$dir/$f")
         if [ "$mine" = "$theirs" ]; then echo "$f: the same ($mine)"; else echo "$f: DIFFERENT - built here $mine, published $theirs"; same=0; fi

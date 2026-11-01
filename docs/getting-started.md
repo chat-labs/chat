@@ -16,7 +16,7 @@ and [chat.vin.moe/chat.ps1](https://chat.vin.moe/chat.ps1). The page lists each 
 compare with what your shell would get.
 
 To keep a copy, prebuilt Linux and Windows x86_64 binaries are on the [releases
-page](https://github.com/Vinnelle/chat/releases), with a `SHA256SUMS` file and its
+page](https://github.com/chat-labs/chat/releases), with a `SHA256SUMS` file and its
 [minisign](https://jedisct1.github.io/minisign/) signature. Check the signature against
 [`keys/minisign.pub`](../keys/minisign.pub) (or
 [`keys/minisign-backup.pub`](../keys/minisign-backup.pub), if the release notes say the backup key

@@ -1,8 +1,8 @@
 # chat
 
-[![test](https://github.com/Vinnelle/chat/actions/workflows/test.yml/badge.svg)](https://github.com/Vinnelle/chat/actions/workflows/test.yml)
-[![build](https://github.com/Vinnelle/chat/actions/workflows/build.yml/badge.svg)](https://github.com/Vinnelle/chat/actions/workflows/build.yml)
-[![release](https://img.shields.io/github/v/release/Vinnelle/chat?include_prereleases&sort=semver)](https://github.com/Vinnelle/chat/releases)
+[![test](https://github.com/chat-labs/chat/actions/workflows/test.yml/badge.svg)](https://github.com/chat-labs/chat/actions/workflows/test.yml)
+[![build](https://github.com/chat-labs/chat/actions/workflows/build.yml/badge.svg)](https://github.com/chat-labs/chat/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/chat-labs/chat?include_prereleases&sort=semver)](https://github.com/chat-labs/chat/releases)
 [![license](https://img.shields.io/badge/license-GPL--3.0--only-blue)](LICENSE)
 
 An end-to-end encrypted group chat for the terminal, with no server and no accounts. Peers find
@@ -58,7 +58,7 @@ irm https://chat.vin.moe | iex           # Windows PowerShell
 ```
 
 To keep a copy, download a release from the [releases
-page](https://github.com/Vinnelle/chat/releases) and check it against
+page](https://github.com/chat-labs/chat/releases) and check it against
 [`keys/minisign.pub`](keys/minisign.pub), as [Getting started](docs/getting-started.md) shows. Then:
 
 1. Run `chat`, and press **Start chatting** (or `Esc`) on the settings page it opens on.

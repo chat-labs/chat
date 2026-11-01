@@ -17,7 +17,7 @@
 #define CHAT_VERSION "0.0.0"
 #endif
 
-#define UPDATE_REPO "Vinnelle/chat"
+#define UPDATE_REPO "chat-labs/chat"
 // The most a download may be (64 MiB), and how long curl gets for one.
 #define UPDATE_MAX_BYTES 67108864
 #define FETCH_TIMEOUT_S 300

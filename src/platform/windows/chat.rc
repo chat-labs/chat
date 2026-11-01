@@ -28,7 +28,7 @@ BEGIN
             VALUE "OriginalFilename", "chat.exe"
             VALUE "ProductName",      "chat"
             VALUE "ProductVersion",   CHAT_VERSION
-            VALUE "Comments",         "https://github.com/Vinnelle/chat"
+            VALUE "Comments",         "https://github.com/chat-labs/chat"
         END
     END
     BLOCK "VarFileInfo"
