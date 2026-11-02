@@ -175,16 +175,8 @@ void chat_peer_name(const chat_t *c, const peer_t *p, char out[CHAT_NAME_LEN]) {
 }
 
 int has_mention(const char *text, const char *nick) {
-    size_t nlen = strlen(nick);
-    if (nlen == 0) return 0;
-    size_t tlen = strlen(text);
-    for (size_t i = 0; i + 1 + nlen <= tlen; i++) {
-        if (text[i] != '@') continue;
-        int match = 1;
-        for (size_t j = 0; j < nlen; j++)
-            if (tolower((unsigned char)text[i + 1 + j]) != tolower((unsigned char)nick[j])) { match = 0; break; }
-        if (match) return 1;
-    }
+    for (const char *at = strchr(text, '@'); at; at = strchr(at + 1, '@'))
+        if (mention_len(at, nick)) return 1;
     return 0;
 }
 

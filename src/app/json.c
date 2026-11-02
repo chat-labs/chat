@@ -24,7 +24,7 @@ int g_json;
 
 // What was sent last of each kind, so only what changed goes out, and what "start" set up.
 static struct {
-    char *peers, *net, *files;
+    char *peers, *net, *files, *trust, *ignored;
     double state_at, files_at;
     int timer_sent;
     unsigned timer;
@@ -35,6 +35,8 @@ static struct {
     char dir[FILE_DIR_MAX];
     char password[MAX_PASSWORD + 1];
     int kept;
+    int call;
+    uint64_t call_day;
 } g_js;
 
 static js_arena g_arena;
@@ -111,8 +113,8 @@ static void jo_bool(jout_t *o, const char *key, int v) {
 }
 
 static void jo_hex(jout_t *o, const char *key, const uint8_t *b, size_t n) {
-    char hex[2 * ID_LEN + 1];
-    if (n > ID_LEN) n = ID_LEN;
+    char hex[2 * ID_SIGN_PUB_LEN + 1];
+    if (n > ID_SIGN_PUB_LEN) n = ID_SIGN_PUB_LEN;
     hex_encode(b, n, hex);
     jo_str(o, key, hex);
 }
@@ -171,6 +173,8 @@ static void forget_state(void) {
     forget(&g_js.peers);
     forget(&g_js.net);
     forget(&g_js.files);
+    forget(&g_js.trust);
+    forget(&g_js.ignored);
     g_js.state_at = g_js.files_at = 0;
     g_js.timer_sent = 0;
     g_js.move_seq = 0;
@@ -234,6 +238,10 @@ static void say_room(chat_t *c, const char *type, const char *password, int crea
     jo_str(&o, "password", password);
     jo_bool(&o, "created", created);
     if (from) jo_str(&o, "from", from);
+    if (g_js.call) {
+        jo_bool(&o, "call", 1);
+        jo_int(&o, "day", (long long)g_js.call_day);
+    }
     put_invite(&o, chat_session_name(c), password);
     jo_open(&o, "me", "{");
     jo_hex(&o, "id", chat_my_id(c), ID_LEN);
@@ -246,28 +254,37 @@ static void say_room(chat_t *c, const char *type, const char *password, int crea
     jo_send(&o);
 }
 
-// "identity": the key in use. made: one made here, so its secret goes out too, for the program to keep.
-static void say_identity(const identity_keypair_t *kp, int pgp, uint32_t created, int made) {
+// "identity": the key in use. secret_out: one made here or asked for with "export", so its secret goes out too.
+static void say_identity(const identity_keypair_t *kp, int pgp, uint32_t created, int secret_out) {
     jout_t o;
     jo_begin(&o, "identity");
+    if (!kp) {
+        jo_str(&o, "kind", "none");
+        jo_send(&o);
+        return;
+    }
     jo_str(&o, "kind", pgp ? "pgp" : "age");
+    jo_hex(&o, "pub", kp->pub, ID_SIGN_PUB_LEN);
     uint8_t fp[ID_FP_LEN];
     char fphex[HEX_GROUPS_LEN(ID_FP_LEN)];
     identity_fingerprint(kp->pub, fp);
     hex_groups(fp, ID_FP_LEN, fphex);
     jo_str(&o, "fingerprint", fphex);
-    if (pgp && made) {
+    if (pgp) {
         static char armor[PGP_ARMOR_MAX];
         uint8_t pfp[PGP_FP_LEN];
-        if (pgp_export_secret_key(kp, g_app.nick, created, armor, sizeof armor, pfp) == 0) jo_str(&o, "secret", armor);
-        pgp_export_public_key(kp, g_app.nick, created, armor, sizeof armor, pfp);
+        const char *uid = g_app.nick[0] ? g_app.nick : "chat";
+        jo_int(&o, "created", (long long)created);
+        if (secret_out && pgp_export_secret_key(kp, uid, created, armor, sizeof armor, pfp) == 0)
+            jo_str(&o, "secret", armor);
+        pgp_export_public_key(kp, uid, created, armor, sizeof armor, pfp);
         jo_str(&o, "public", armor);
         crypto_wipe(armor, sizeof armor);
-    } else if (!pgp) {
+    } else {
         char recipient[AGE_RECIPIENT_STRLEN + 1];
         age_export_recipient(kp, recipient);
         jo_str(&o, "public", recipient);
-        if (made) {
+        if (secret_out) {
             char secret[AGE_SECRET_KEY_STRLEN + 1];
             age_export_secret_key(kp, secret);
             jo_str(&o, "secret", secret);
@@ -425,6 +442,7 @@ static void send_net(chat_t *c) {
     jo_bool(&o, "ready", chat_ready(c));
     jo_int(&o, "online", chat_online_count(c));
     jo_int(&o, "pending", chat_pending_count(c));
+    jo_int(&o, "rx", (long long)n.rx);
     if (chat_route_mode(c) == ROUTE_TOR) {
         char tor[96];
         tor_link_status(tor, sizeof tor);
@@ -442,6 +460,39 @@ static void send_net(chat_t *c) {
         jo_raw(&o, "}");
     }
     jo_send_changed(&o, &g_js.net);
+}
+
+static void put_key_list(jout_t *o, int n, const trust_entry_t *(*at)(int)) {
+    jo_open(o, "list", "[");
+    for (int i = 0; i < n; i++) {
+        const trust_entry_t *e = at(i);
+        if (!e) continue;
+        uint8_t fp[ID_FP_LEN];
+        char fphex[HEX_GROUPS_LEN(ID_FP_LEN)];
+        identity_fingerprint(e->pub, fp);
+        hex_groups(fp, ID_FP_LEN, fphex);
+        jo_open(o, NULL, "{");
+        jo_str(o, "source", trust_source_name(e->source));
+        jo_hex(o, "pub", e->pub, ID_SIGN_PUB_LEN);
+        jo_str(o, "fingerprint", fphex);
+        jo_str(o, "nick", e->nick);
+        jo_raw(o, "}");
+    }
+    jo_raw(o, "]");
+}
+
+static void send_trust(void) {
+    jout_t o;
+    jo_begin(&o, "trust");
+    put_key_list(&o, trust_count(), trust_at);
+    jo_send_changed(&o, &g_js.trust);
+}
+
+static void send_ignored(void) {
+    jout_t o;
+    jo_begin(&o, "ignored");
+    put_key_list(&o, ignore_count(), ignore_at);
+    jo_send_changed(&o, &g_js.ignored);
 }
 
 static void send_files(chat_t *c, double now) {
@@ -531,6 +582,8 @@ static void send_state(chat_t *c, double now) {
         send_net(c);
         send_timer(c);
         send_move(c);
+        send_trust();
+        send_ignored();
     }
     send_files(c, now);
 }
@@ -566,15 +619,45 @@ static void run_on(chat_t *c, const char *cmd, const peer_t *p, const char *rest
     crypto_wipe(line, sizeof line);
 }
 
-// "identity", or "start"'s: a new key, or one given as text, made the one in use. answer: say which.
+// "identity", or "start"'s: a new key, one made from a password, one given as text, or "none" to stop signing.
 static int read_identity(const js_value *v, int answer) {
-    const char *kind = jstr(v, "kind"), *key = jstr(v, "key");
-    int pgp = pick(kind, IDENTITY_NAMES, 4) == IDENT_PGP;
-    if (!pgp && pick(kind, IDENTITY_NAMES, 4) != IDENT_AGE) { say_error("identity needs \"kind\": age or pgp"); return -1; }
+    const char *kind = jstr(v, "kind"), *key = jstr(v, "key"), *pw = jstr(v, "password");
+    int k = pick(kind, IDENTITY_NAMES, 4);
+    if (k == IDENT_NONE) {
+        g_app.identity_source = IDENT_NONE;
+        crypto_wipe(&g_app.identity, sizeof g_app.identity);
+        if (answer) say_identity(NULL, 0, 0, 0);
+        return 0;
+    }
+    int pgp = k == IDENT_PGP;
+    if (!pgp && k != IDENT_AGE) { say_error("identity needs \"kind\": age, pgp or none"); return -1; }
     identity_keypair_t kp;
-    int made = jbool(v, "new", 0);
-    uint32_t created = (uint32_t)time(NULL);
-    if (made) {
+    int made = jbool(v, "new", 0), secret_out = made || jbool(v, "export", 0);
+    long long cr = jint(v, "created", 0);
+    uint32_t created = cr > 0 ? (uint32_t)cr : (uint32_t)time(NULL);
+    if (pw && pw[0]) {
+        const char *dev = jstr(v, "device");
+        char mbuf[128] = "";
+        if (!dev || !dev[0]) {
+            if (platform_machine_id(mbuf, sizeof mbuf) != 0) {
+                say_error("this system has no machine id to make the key with");
+                return -1;
+            }
+            dev = mbuf;
+        }
+        int with_nick = jbool(v, "with_nick", 1);
+        char clean[MAX_NICK + 1] = "";
+        if (with_nick) {
+            const char *n = jstr(v, "nick");
+            chat_clean_nick(n && n[0] ? n : g_app.nick, clean);
+        }
+        if (identity_from_password(pw, dev, with_nick ? clean : NULL, &kp) != 0) {
+            say_error("couldn't make the key - it needs 512 MiB of free memory for a moment");
+            return -1;
+        }
+        created = DERIVED_PGP_CREATED;
+        secret_out = 1;
+    } else if (made) {
         gen_identity_keypair(&kp);
     } else if (!key || (pgp ? pgp_import_secret_key_text(key, &kp) : age_import_secret_key_text(key, &kp)) != 0) {
         say_error(pgp ? "\"key\" isn't an unencrypted PGP EdDSA secret key" : "\"key\" isn't an AGE secret key");
@@ -582,8 +665,26 @@ static int read_identity(const js_value *v, int answer) {
     }
     g_app.identity_source = pgp ? IDENT_PGP : IDENT_AGE;
     g_app.identity = kp;
-    if (answer) say_identity(&kp, pgp, created, made);
+    if (answer) say_identity(&kp, pgp, created, secret_out);
     crypto_wipe(&kp, sizeof kp);
+    return 0;
+}
+
+static int read_key_entries(const js_value *arr, int (*add_fn)(identity_source_t, const uint8_t *, const char *)) {
+    if (!arr || arr->type != JS_ARR) { say_error("key list must be an array"); return -1; }
+    for (size_t i = 0; i < arr->n; i++) {
+        const js_value *it = &arr->items[i];
+        const char *src_s = it->type == JS_OBJ ? jstr(it, "source") : NULL;
+        const char *pub_s = it->type == JS_OBJ ? jstr(it, "pub") : NULL;
+        const char *nick = it->type == JS_OBJ ? jstr(it, "nick") : NULL;
+        int src = src_s ? trust_source_from(src_s) : IDENT_AGE;
+        uint8_t pub[ID_SIGN_PUB_LEN];
+        if (src <= 0 || !pub_s || strlen(pub_s) != 2 * ID_SIGN_PUB_LEN || hex_decode(pub_s, 2 * ID_SIGN_PUB_LEN, pub) != 0 || !nick || !nick[0]) {
+            say_error("each key entry needs \"source\" (age, pgp or key), 64-hex \"pub\" and \"nick\"");
+            return -1;
+        }
+        add_fn((identity_source_t)src, pub, nick);
+    }
     return 0;
 }
 
@@ -686,6 +787,10 @@ static int read_settings(const js_value *v) {
     g_js.picture_max = max < PICTURE_MIN ? PICTURE_MIN : max > PICTURE_MAX ? PICTURE_MAX : (int)max;
     const char *bg = picture ? jstr(picture, "background") : NULL;
     if (bg && parse_color(bg, g_js.picture_bg) != 0) { say_error("unknown picture background %s", bg); return -1; }
+    const js_value *trust = js_obj_get(v, "trust");
+    if (trust) { trust_clear(); if (read_key_entries(trust, trust_add) != 0) return -1; }
+    const js_value *ignored = js_obj_get(v, "ignored");
+    if (ignored) { ignore_clear(); if (read_key_entries(ignored, ignore_add) != 0) return -1; }
     const js_value *identity = js_obj_get(v, "identity");
     return identity ? read_identity(identity, 0) : 0;
 }
@@ -697,7 +802,28 @@ static chat_t *json_start(const js_value *v, const options_t *opts) {
     memset(&o, 0, sizeof o);
     copy_str(o.nick, g_app.nick, sizeof o.nick);
     const char *room = jstr(v, "room"), *password = jstr(v, "password"), *invite = jstr(v, "invite");
-    if (invite) {
+    const char *call_hex = jstr(v, "call");
+    g_js.call = 0;
+    g_js.call_day = 0;
+    if (call_hex) {
+        uint8_t pub[ID_SIGN_PUB_LEN];
+        long long d = jint(v, "day", -1);
+        uint64_t day = d >= 0 ? (uint64_t)d : chat_contact_day();
+        if (g_app.identity_source == IDENT_NONE) {
+            crypto_wipe(&o, sizeof o);
+            say_error("a call needs a signing identity");
+            return NULL;
+        }
+        if (strlen(call_hex) != 2 * ID_SIGN_PUB_LEN || hex_decode(call_hex, 2 * ID_SIGN_PUB_LEN, pub) != 0
+            || chat_contact_room(&g_app.identity, pub, day, o.session_name, o.password) != 0) {
+            crypto_wipe(&o, sizeof o);
+            say_error("no call room can be worked out with that \"call\" key");
+            return NULL;
+        }
+        o.created = 0;
+        g_js.call = 1;
+        g_js.call_day = day;
+    } else if (invite) {
         // Its check catches a mistyped or cut off invite, instead of joining some other room.
         int r = chat_invite_parse(invite, o.session_name, o.password);
         if (r != 1) {
@@ -744,6 +870,7 @@ static chat_t *json_start(const js_value *v, const options_t *opts) {
         o.route.tor.socks[0] = o.route.tor.control[0] = '\0';
     }
     app_session_opts(&o);
+    if (g_js.call) o.verify_optional = 0;
     o.persist = jbool(v, "history", 0);
     o.file_view = json_file_view;
     o.delivery = json_delivery;
@@ -764,6 +891,7 @@ static chat_t *json_start(const js_value *v, const options_t *opts) {
     long long timer = jint(v, "timer", 0);
     if (timer >= TIMER_MIN && timer <= TIMER_MAX) chat_set_timer(c, (unsigned)timer);
     g_js.kept = jbool(v, "kept", 0);
+    trust_set_saved(g_js.kept);
     say_room(c, "ready", g_js.password, created, NULL);
     return c;
 }
@@ -805,6 +933,8 @@ static chat_t *json_move(chat_t *c, chat_t **left, const chat_move_to_t *to) {
     chat_move_go(c, to, n, now_seconds());
     chat_set_print(c, json_quiet);
     copy_str(g_js.password, to->password, sizeof g_js.password);
+    g_js.call = 0;
+    g_js.call_day = 0;
     forget_state();
     say_room(n, "moved", to->password, to->created, to->from);
     return n;
@@ -897,7 +1027,8 @@ static int js_history(chat_t *c, const js_value *v, double now) {
 static int js_settings(chat_t *c, const js_value *v, double now) {
     (void)now;
     const char *nick = jstr(v, "nick"), *colour = jstr(v, "colour"), *verify = jstr(v, "verify");
-    const js_value *notify = js_obj_get(v, "notify");
+    const char *net_log = jstr(v, "net_log");
+    const js_value *notify = js_obj_get(v, "notify"), *files = js_obj_get(v, "files"), *route = js_obj_get(v, "route");
     uint8_t rgb[3];
     if (colour && parse_color(colour, rgb) != 0) { say_error("unknown colour %s", colour); return 1; }
     if (colour) { memcpy(g_app.color, rgb, 3); chat_set_colour(c, rgb); }
@@ -905,19 +1036,85 @@ static int js_settings(chat_t *c, const js_value *v, double now) {
     if (verify) {
         int k = pick(verify, VERIFY_NAMES, 2);
         if (k < 0) say_error("\"verify\" is optional or required");
-        else chat_set_verify_required(c, !k);
+        else if (!g_js.call) chat_set_verify_required(c, !k);
+    }
+    if (net_log) {
+        int k = pick(net_log, NET_LOG_NAMES, 3);
+        if (k < 0) say_error("\"net_log\" is normal, verbose or off");
+        else { g_app.net_log = k; chat_set_net_log(c, k); }
     }
     if (notify) {
         int m = pick(jstr(notify, "mode"), NOTIFY_NAMES, 3), p = pick(jstr(notify, "preview"), PREVIEW_NAMES, 3);
         if (m >= 0) chat_set_notify_mode(c, (notify_mode_t)m);
         if (p >= 0) chat_set_notify_preview(c, (notify_preview_t)p);
     }
+    if (files) {
+        long long limit = jint(files, "limit", 0);
+        if (limit < 0 || (uint64_t)limit > FILE_HARD_MAX) { say_error("files \"limit\" is 1 byte to 1 GB"); return 1; }
+        if (limit) g_app.file_cap = (uint64_t)limit;
+        g_app.fast_files = jbool(files, "fast", g_app.fast_files);
+        g_app.picture_noise = jbool(files, "noise", g_app.picture_noise);
+        const char *dir = jstr(files, "dir");
+        if (dir) copy_str(g_js.dir, dir, sizeof g_js.dir);
+        chat_set_file_options(c, g_app.file_cap, g_app.fast_files);
+        chat_set_picture_noise(c, g_app.picture_noise);
+    }
+    if (route) {
+        routing_t r = g_app.route;
+        int dht = jbool(route, "dht", r.dht4);
+        r.dht4 = dht;
+        r.dht6 = dht && jbool(route, "ipv6", r.dht6);
+        r.lan = jbool(route, "lan", r.lan);
+        r.portmap = jbool(route, "portmap", r.portmap);
+        const char *nostr = jstr(route, "nostr");
+        if (nostr) {
+            int k = pick(nostr, NOSTR_NAMES, 3);
+            if (k < 0) { say_error("route \"nostr\" is off, fallback or always"); return 1; }
+            r.nostr = k;
+        }
+        const js_value *relays = js_obj_get(route, "relays");
+        if (relays && relays->type == JS_ARR) {
+            r.n_relays = 0;
+            for (size_t i = 0; i < relays->n; i++) {
+                const char *u = js_str(&relays->items[i]);
+                if (!u || nostr_url_ok(u) != 0) { say_error("bad relay %s (want wss://host[:port][/path])", u ? u : "(not text)"); return 1; }
+                if (r.n_relays >= NOSTR_MAX_RELAYS) { say_error("at most %d relays", NOSTR_MAX_RELAYS); return 1; }
+                copy_str(r.relays[r.n_relays++], u, NOSTR_URL_MAX);
+            }
+        }
+        g_app.route = r;
+        chat_apply_routing(c, &g_app.route);
+    }
     return 1;
 }
 
 static int js_identity(chat_t *c, const js_value *v, double now) {
     (void)now;
-    if (read_identity(v, 1) == 0) chat_set_identity(c, g_app.identity_source, &g_app.identity);
+    if (read_identity(v, 1) == 0)
+        chat_set_identity(c, g_app.identity_source, g_app.identity_source == IDENT_NONE ? NULL : &g_app.identity);
+    return 1;
+}
+
+static int js_trust(chat_t *c, const js_value *v, double now) {
+    (void)now;
+    const js_value *list = js_obj_get(v, "list");
+    trust_clear();
+    if (read_key_entries(list, trust_add) == 0) chat_recheck_trust(c);
+    return 1;
+}
+
+static int js_ignored(chat_t *c, const js_value *v, double now) {
+    (void)now;
+    uint8_t prev[IGNORE_MAX][ID_SIGN_PUB_LEN];
+    int n_prev = ignore_count();
+    for (int i = 0; i < n_prev && i < IGNORE_MAX; i++) memcpy(prev[i], ignore_at(i)->pub, ID_SIGN_PUB_LEN);
+    const js_value *list = js_obj_get(v, "list");
+    ignore_clear();
+    if (read_key_entries(list, ignore_add) == 0) {
+        for (int i = 0; i < n_prev && i < IGNORE_MAX; i++)
+            if (!ignore_by_key(prev[i])) chat_unignore_key(c, prev[i]);
+        chat_recheck_trust(c);
+    }
     return 1;
 }
 
@@ -962,6 +1159,7 @@ static int js_state(chat_t *c, const js_value *v, double now) {
 static int js_quit(chat_t *c, const js_value *v, double now) {
     (void)c; (void)now;
     g_js.kept = jbool(v, "kept", g_js.kept);
+    trust_set_saved(g_js.kept);
     return 0;
 }
 
@@ -970,8 +1168,9 @@ static const struct { const char *name; json_cmd_fn fn; } COMMANDS[] = {
     { "verify", js_verify },     { "ignore", js_ignore },     { "fetch", js_fetch },
     { "offer", js_offer },       { "cancel", js_cancel },     { "timer", js_timer },
     { "history", js_history },   { "settings", js_settings }, { "identity", js_identity },
-    { "move", js_move },         { "newtor", js_newtor },     { "command", js_command },
-    { "state", js_state },       { "quit", js_quit },
+    { "trust", js_trust },       { "ignored", js_ignored },   { "move", js_move },
+    { "newtor", js_newtor },     { "command", js_command },   { "state", js_state },
+    { "quit", js_quit },
 };
 
 // One line from stdin. 0 once it's time to stop.

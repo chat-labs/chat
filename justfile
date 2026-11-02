@@ -60,7 +60,7 @@ build what="native" *args:
             done
             ;;
         android)
-            # The NDK named, else the newest in an SDK: named, Android Studio's, or chat-gui's
+            # The NDK named, else the newest in an SDK: named, Android Studio's, or chat-apk's
             ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
             for sdk in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Android/Sdk" "$HOME/.local/share/android-sdk"; do
                 [ -z "$ndk" ] && [ -n "$sdk" ] && ndk=$(ls -d "$sdk"/ndk/*/ 2>/dev/null | sort -V | tail -n 1)

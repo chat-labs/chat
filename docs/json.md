@@ -42,7 +42,7 @@ A short session, `>` for what goes in and `<` for what comes out:
 
 | `cmd` | Fields | What it does |
 | --- | --- | --- |
-| `identity` | `kind`: `age` or `pgp`; `new`: `true`, or `key`: the secret key as text | Makes a new signing key, or reads one: an AGE identity (`AGE-SECRET-KEY-1...`), or an unencrypted armored PGP EdDSA secret key. It's used from then on, and the answer is an `identity` object. Also works in a room |
+| `identity` | `kind`: `age`, `pgp` or `none`; `new`: `true`, `password` (with optional `device`, `with_nick`, `nick`), or `key`: the secret key as text (and optional `created`, `export`) | Makes a new signing key, derives one from a password, reads one (`AGE-SECRET-KEY-1...`, or an unencrypted armored PGP EdDSA secret key), or (`none`) stops signing. It's used from then on, and the answer is an `identity` object. Also works in a room |
 | `start` | see below | Opens the room. The answer is `ready`, or an `error` and `bye` |
 | `quit` | | Ends without a room |
 
@@ -52,6 +52,7 @@ A short session, `>` for what goes in and `<` for what comes out:
 | --- | --- |
 | `room`, `password` | The room's id and password. Without `room`, chat makes a new one, and without `password` for a new room, a random one in words, as the NEW box does. Without either for a room you join, the password is `CHAT_PASSWORD`, or blank |
 | `invite` | An invite (`chat:ID:PASSWORD:CHECK`, as `:invite` gives it) in place of `room` and `password`. A mistyped or cut off one is an `error`, since its check doesn't match |
+| `call`, `day` | A verified peer's signing public key (64 hex digits), and optionally the UTC day (`chat_contact_day` without it), in place of `room` and `password`, as `:call` opens it. Requires an `identity`, and forces `verify` to `required` |
 | `create` | `true` for a new room (the default without `room`): it opens at once instead of waiting for someone to answer |
 | `nick`, `colour` | Your name and colour here (`"#rrggbb"` or a colour's name); random without them |
 | `route` | `mode` (`udp` or `tor`), `dht`, `ipv6`, `lan` and `portmap` (`false` turns each off), `nostr` (`off`, `fallback` or `always`), `relays` (a list of `wss://` addresses) and `tor`: `socks` and `control` (`host:port` of a running tor), `password` (its control port's `HashedControlPassword`; without it, its cookie), `launch` (`auto`, `always` or `never`, as `--tor-launch`) and `path` (the tor to start) |
@@ -64,6 +65,7 @@ A short session, `>` for what goes in and `<` for what comes out:
 | `timer` | A message timer to ask for, in seconds (60 to 604800) |
 | `kept` | `true`: when you quit, peers are told you went offline, not that you left, as for a kept room |
 | `identity` | `kind` and `key`, as the `identity` command takes |
+| `trust`, `ignored` | Lists of `{source, pub, nick}` entries (`source`: `age`, `pgp` or `key`; `pub`: 64 hex digits) for verified and ignored signing keys |
 | `net_log` | `normal`, `verbose` or `off`, as `:set net` |
 
 ### In a room
@@ -82,8 +84,9 @@ Peers are named by their `id`, as `peers` lists them.
 | `cancel` | `num` | Stops a file coming, or withdraws one of yours |
 | `timer` | `seconds` | Asks for a message timer, 0 for none |
 | `history` | `on` | Tells everyone you keep a history, or that you've stopped |
-| `settings` | `nick`, `colour`, `verify`, `notify` | Changes them, as in `start` |
-| `identity` | as above | Signs with another key from now on |
+| `settings` | `nick`, `colour`, `verify`, `notify`, `files`, `route`, `net_log` | Changes them on the running session, as in `start` (`route` updates live toggles and `relays`) |
+| `identity` | as above | Signs with another key from now on, or (`none`) stops signing |
+| `trust`, `ignored` | `list` | Replaces the verified or ignored signing keys (`{source, pub, nick}`) and rechecks peers |
 | `move` | `answer` | Without `answer`: a `move_plan` object. `true` moves the room (or goes, when a peer asked), `false` stays. See `moved` |
 | `newtor` | | New Tor circuits and a new onion address (`:newtor`) |
 | `command` | `line` | Any of the room's commands, as typed after `:`. What it says comes as `line` objects |
@@ -97,15 +100,16 @@ A command that can't be read or run gets an `error` object.
 | `t` | Fields | When |
 | --- | --- | --- |
 | `hello` | `v`, `version`, `built` | First, once |
-| `identity` | `kind`, `fingerprint`, `public` (an AGE recipient, or for a new PGP key its public key), `secret` (only for a key made here) | After `identity` |
-| `ready` | `room`, `password`, `created`, `invite`, `qr`, `me` (`id`, `nick`, `colour`), `route`, `port` (UDP), `history` | The room is open |
+| `identity` | `kind`, `pub`, `fingerprint`, `created` (PGP), `public` (an AGE recipient, or an armored PGP public key), `secret` (for a key made here or with `export`) | After `identity` |
+| `ready` | `room`, `password`, `created`, `call` and `day` (for a call), `invite`, `qr`, `me` (`id`, `nick`, `colour`), `route`, `port` (UDP), `history` | The room is open |
 | `moved` | as `ready`, and `from` | `:move` took you to a new room. This process runs that one from now on |
 | `line` | `at` (`HH:MM`), `kind`, `text`, `colour`, and for a message the fields below | Something to show in the room |
 | `log` | `at`, `text` | chat's own notes, such as the sandbox going up or tor connecting |
 | `notify` | `nick`, `text`, `mention` | A message that should get a notification. `nick` and `text` are only there if `notify.preview` allows them |
 | `delivery` | `own`, then `missed` (a peer's name) or `settled` | What became of a message of yours: a peer it went to never acked it, or every peer has it now, or as many as will |
 | `peers` | `list` | The peers, whenever anything about them changes |
-| `net` | `ready`, `online`, `pending`, then `tor`, `onion` (Tor) or `dht`, `dht_found`, `portmap` (UDP), and `relays` (`used`, `up`, `total`) | How the room reaches its peers, when it changes |
+| `trust`, `ignored` | `list` | Verified or ignored signing keys (`{source, pub, fingerprint, nick}`), when they change |
+| `net` | `ready`, `online`, `pending`, `rx`, then `tor`, `onion` (Tor) or `dht`, `dht_found`, `portmap` (UDP), and `relays` (`used`, `up`, `total`) | How the room reaches its peers, when it changes |
 | `files` | `list` | The files offered here and yours, when they change, at most twice a second |
 | `picture` | `num`, `name`, `w`, `h`, `src_w`, `src_h`, `rgb`, or `error` | A picture fetched with `show` |
 | `timer` | `seconds`, `who` | The message timer kept to here, and who asked for it, when it changes |

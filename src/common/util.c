@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 #include "common/util.h"
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -399,6 +400,21 @@ int link_target(const char *link, size_t n, char *out, size_t cap) {
     }
     out[o] = '\0';
     return 0;
+}
+
+size_t mention_len(const char *s, const char *nick) {
+    size_t n = strlen(nick);
+    if (s[0] != '@' || n == 0) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (tolower((unsigned char)s[1 + i]) != tolower((unsigned char)nick[i])) return 0;
+    const char *rest = s + 1 + n;
+    size_t adv;
+    uint32_t cp = utf8_decode(rest, strlen(rest), 0, &adv);
+    // Accented Latin letters go on a name too; other scripts, symbols and emoji end it, so a mention
+    // can run into the next word where there are no spaces.
+    int name = cp < 0x80 ? isalnum((int)cp) || cp == '-' || cp == '_'
+                         : cp >= 0xc0 && cp <= 0x24f && cp != 0xd7 && cp != 0xf7;
+    return name ? 0 : 1 + n;
 }
 
 #define SESSION_ID_MAX 64

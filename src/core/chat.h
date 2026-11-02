@@ -393,6 +393,10 @@ uint64_t chat_contact_day(void);
 // Whether the member with this id is ignored here (:ignore): what it says, sends directly and offers
 // isn't shown, though what it says is still passed on to others.
 int chat_ignored(const chat_t *c, const uint8_t id[ID_LEN]);
+// Checks connected peers against the verified and ignored signing keys after either list changed
+// outside this session, and un-ignores any peer signing with a key removed from the ignored list.
+void chat_recheck_trust(chat_t *c);
+void chat_unignore_key(chat_t *c, const uint8_t pub[ID_SIGN_PUB_LEN]);
 
 // An invite (:invite): a room's id and password as one string, "chat:ID:PASSWORD:CHECK", CHECK being
 // invite_check in hex. The password can hold ':', since the id ends at the first and the check

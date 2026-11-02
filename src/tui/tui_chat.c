@@ -239,9 +239,10 @@ static void draw_link(pen_t *p, style_t st, const char *t, size_t len, const cha
 }
 
 // A chat line's text in style st (t, from off in lk->text on), its links underlined, and each @nick
-// that matches self highlighted, the same way the chat matches them: any case, followed by anything.
+// that names self highlighted, as mention_len matches them. The match looks at the whole line, so a
+// longer name cut by the wrap isn't lit on the row that ends with self's part of it.
 static void draw_body(pen_t *p, style_t st, const char *t, size_t off, const line_links_t *lk, const char *self) {
-    size_t sl = self ? strlen(self) : 0, tn = strlen(t);
+    size_t tn = strlen(t);
     char run[TUI_LINE_MAX + 1];
     size_t rn = 0;
     for (size_t i = 0; i < tn; ) {
@@ -257,10 +258,8 @@ static void draw_body(pen_t *p, style_t st, const char *t, size_t off, const lin
             i = end;
             continue;
         }
-        int at = sl > 0 && t[i] == '@';
-        for (size_t k = 0; at && k < sl; k++)
-            if (tolower((unsigned char)t[i + 1 + k]) != tolower((unsigned char)self[k])) at = 0;
-        if (!at) {
+        size_t ml = self && t[i] == '@' ? mention_len(lk->text + off + i, self) : 0;
+        if (!ml) {
             if (rn < sizeof run - 1) run[rn++] = t[i];
             i++;
             continue;
@@ -268,12 +267,11 @@ static void draw_body(pen_t *p, style_t st, const char *t, size_t off, const lin
         run[rn] = '\0';
         ptext(p, st, run);
         rn = 0;
+        if (ml > tn - i) ml = tn - i;
         char nick[TUI_LINE_MAX + 1];
-        size_t nl = 1 + sl < sizeof nick ? 1 + sl : sizeof nick - 1;
-        memcpy(nick, t + i, nl);
-        nick[nl] = '\0';
+        copy_slice(nick, sizeof nick, t + i, ml);
         ptext(p, S_YELLOW_BOLD, nick);
-        i += 1 + sl;
+        i += ml;
     }
     run[rn] = '\0';
     ptext(p, st, run);

@@ -179,6 +179,25 @@ void test_links(double *t) {
               "the chat's link %d came out as %s from %s at %s, want %s", i, l.text, l.from, l.hhmm, want[i]);
 }
 
+void test_mentions(double *t) {
+    (void)t;
+    static const struct { const char *text; int names; } CASES[] = {
+        { "@Finlay-android-test Test", 0 },
+        { "@finlay2 @finlay_ @finlay\xc3\xa9", 0 },
+        { "@fin finlay", 0 },
+        { "hi @FINLAY, you there?", 1 },
+        { "@finlay's", 1 },
+        { "@finlay", 1 },
+        { "@finlay\xe3\x81\x95\xe3\x82\x93", 1 },
+        { "@Finlay-android-test and @finlay", 1 },
+    };
+    for (size_t i = 0; i < COUNT_OF(CASES); i++)
+        CHECK(has_mention(CASES[i].text, "finlay") == CASES[i].names, "'%s' %s finlay", CASES[i].text,
+              CASES[i].names ? "doesn't name" : "names");
+    CHECK(mention_len("@Finlay. hi", "finlay") == 7, "a mention's length doesn't stop at the nick");
+    CHECK(!has_mention("@", "") && !mention_len("@finlay", ""), "an empty nick is mentioned");
+}
+
 static int qr_at(const uint8_t *m, int size, int x, int y) { return m[y * size + x]; }
 
 // A QR code, by its structure: the version a length needs, the finders and their separators, the

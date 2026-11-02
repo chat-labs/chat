@@ -378,6 +378,24 @@ static int check_trust(chat_t *c, peer_t *p) {
     return 1;
 }
 
+void chat_recheck_trust(chat_t *c) {
+    for (int i = 0; i < c->peer_hi; i++) {
+        peer_t *p = &c->peers[i];
+        if (!p->used) continue;
+        if (p->trust == TRUST_KEY && (p->identity_state != VERIFY_VERIFIED || !trust_by_key(p->identity_pub)))
+            p->trust = TRUST_UNKNOWN;
+        if (p->ok && p->announced) recheck_trust(c, p);
+    }
+}
+
+void chat_unignore_key(chat_t *c, const uint8_t pub[ID_SIGN_PUB_LEN]) {
+    for (int i = 0; i < c->peer_hi; i++) {
+        peer_t *p = &c->peers[i];
+        if (p->used && p->identity_state == VERIFY_VERIFIED && memcmp(p->identity_pub, pub, ID_SIGN_PUB_LEN) == 0)
+            set_ignored(c, p->id, 0);
+    }
+}
+
 // "* NICK (verified) joined": shown once p's nick and identity are known, which "k" carries. It's
 // the first frame p sends, but it can be lost or overtaken, and another frame opening first would
 // otherwise announce "anon (unverified)".

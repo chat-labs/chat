@@ -144,6 +144,7 @@ void test_builds(double *t);
 // parsers_test.c
 void test_bytewords(double *t);
 void test_links(double *t);
+void test_mentions(double *t);
 void test_qr(double *t);
 void test_toml(double *t);
 void test_parsers(double *t);

@@ -44,6 +44,10 @@ int link_next(const char *s, size_t n, size_t *from, size_t *at, size_t *len);
 // each byte past ASCII, '$' and '\'' %-encoded. 0, or -1 (and "") if it doesn't fit in cap.
 int link_target(const char *link, size_t n, char *out, size_t cap);
 
+// The length of the @nick at s if it names nick (any case, and not run on into a longer name, so
+// "@ann," names ann but "@anna" and "@ann-2" don't), or 0.
+size_t mention_len(const char *s, const char *nick);
+
 void random_session_id(char *out, size_t len);
 // A session id in the same letters from n, for one worked out rather than made up.
 void session_id_from(uint64_t n, char *out, size_t len);
