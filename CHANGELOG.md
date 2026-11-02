@@ -3,7 +3,7 @@
 All notable changes to chat, newest first. Each beta (`X.Y.Z-beta.N`) has a section of its own until
 its release, which folds them into one. A release's notes on GitHub are its section here.
 
-## Unreleased
+## 0.5.6
 
 ### Added
 - `--json` runs one session for another program to drive, with JSON Lines both ways: messages with

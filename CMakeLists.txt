@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 finlay@tuta.com
 cmake_minimum_required(VERSION 3.15)
-project(chat VERSION 0.5.5 LANGUAGES C)
+project(chat VERSION 0.5.6 LANGUAGES C)
 # "-beta.N" on a beta of the version above (`just beta`); `just release` empties it.
 set(CHAT_PRERELEASE "")
 
