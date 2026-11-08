@@ -722,8 +722,12 @@ mod tests {
         for d in ["b", ".a", "A"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
-        for f in ["z.txt", ".x", "c.txt", "bad\u{1b}[2J"] {
+        for f in ["z.txt", ".x", "c.txt"] {
             std::fs::write(dir.join(f), "").unwrap();
+        }
+        // Windows refuses control characters in file names, so there's nothing to hide there.
+        if !cfg!(windows) {
+            std::fs::write(dir.join("bad\u{1b}[2J"), "").unwrap();
         }
         let names: Vec<String> = list(&dir).unwrap().into_iter().map(|e| e.name).collect();
         std::fs::remove_dir_all(&dir).unwrap();
