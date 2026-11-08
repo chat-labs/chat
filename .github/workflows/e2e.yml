@@ -1,0 +1,83 @@
+# End to end: real processes in one room, driven over the JSON interface (chat-core/tests/interop).
+# Every pull request runs the loopback suites twice: between two chat-json, and between chat-json
+# and chat itself (`chat --json`, the binary that's released, sandbox and all). Each night adds the
+# long rekey run and two rooms meeting over the live Tor network.
+name: E2E
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The sandbox lets chat write its temporary files in XDG_RUNTIME_DIR when there is one; the tests
+  # make theirs in TMPDIR, so both go there.
+  XDG_RUNTIME_DIR: ""
+
+jobs:
+  loopback:
+    name: Loopback (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: chat-json and chat-json
+            peer: ../target/debug/chat-json
+          - name: chat-json and chat
+            peer: ../target/debug/chat --json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: just@1.58.0
+      - run: cargo build --locked --bin chat-json --bin chat
+      - name: Handshakes, messages, DMs, replies, leaving
+        run: just core::interop 4 "$PEER"
+        env:
+          PEER: ${{ matrix.peer }}
+      - name: Files both ways
+        run: just core::interop-files "$PEER"
+        env:
+          PEER: ${{ matrix.peer }}
+      - name: Moving the room
+        run: just core::interop-move "$PEER"
+        env:
+          PEER: ${{ matrix.peer }}
+
+  nightly:
+    name: Rekeys and Tor
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: just@1.58.0
+      - run: cargo build --locked --bin chat-json --bin chat
+      - name: Four minutes of rekeys every 30 s, chat-json and chat
+        run: just core::interop-rekey 240 "../target/debug/chat --json"
+      - name: Two rooms meeting over the live Tor network
+        run: just core::tor-pair

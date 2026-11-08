@@ -1,0 +1,4 @@
+[env]
+# zig links the Windows builds, and takes the system's own import libraries (ntdll, kernel32...),
+# not the copies winapi bundles, which it can't link.
+WINAPI_NO_BUNDLED_LIBRARIES = "1"

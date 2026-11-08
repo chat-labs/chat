@@ -1,0 +1,136 @@
+set positional-arguments
+
+# List recipes
+default:
+    @just --list --unsorted
+
+# ---------------------------------------------------------------------------------------------
+# Build
+
+# Build chat-core and chat-json: debug (default), release, or dist
+[group('build')]
+build profile="debug":
+    #!/bin/sh
+    set -eu
+    case "$1" in
+        debug) cargo build ;;
+        release) cargo build --release && ls -lh ../target/release/chat-json ;;
+        dist) cargo build --profile dist && ls -lh ../target/dist/chat-json ;;
+        *) echo "just build takes debug, release, or dist, not $1" >&2; exit 1 ;;
+    esac
+
+# Fast type-check without code generation
+[group('build')]
+check:
+    cargo check
+
+# A static Linux chat-json that runs anywhere (needs the musl target and a musl C compiler)
+[group('build')]
+static:
+    cargo build --release --target x86_64-unknown-linux-musl
+    ls -lh ../target/x86_64-unknown-linux-musl/release/chat-json
+
+# chat-core as a shared library an app loads in-process (include/chat.h), for this system or TARGET
+# (an Android app's needs that target installed and the NDK's linker set for it)
+[group('build')]
+lib target="":
+    #!/bin/sh
+    set -eu
+    cargo rustc --lib --release --crate-type cdylib ${1:+--target "$1"}
+
+# chat-json for an Android app, which runs it as a program (chat-apk: lib/ABI/libchat.so). TARGET
+# is the Rust target (aarch64-linux-android, x86_64-linux-android, armv7-linux-androideabi,
+# i686-linux-android) and API the oldest Android it runs on. The NDK is ANDROID_NDK_HOME's.
+# chat-json for Android TARGET, built with the NDK
+[group('build')]
+android target api="28":
+    #!/bin/sh
+    set -eu
+    ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+    test -d "$ndk" || { echo "set ANDROID_NDK_HOME to the NDK's folder" >&2; exit 1; }
+    bin="$ndk/toolchains/llvm/prebuilt/$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64/bin"
+    case "$1" in
+        armv7-linux-androideabi) clang="$bin/armv7a-linux-androideabi$2-clang" ;;
+        *-linux-android) clang="$bin/$1$2-clang" ;;
+        *) echo "just android takes an Android target, not $1" >&2; exit 1 ;;
+    esac
+    test -x "$clang" || { echo "this NDK has no compiler for $1 at API $2 ($clang)" >&2; exit 1; }
+    rustup target add "$1" >/dev/null
+    under=$(echo "$1" | tr - _)
+    upper=$(echo "$under" | tr '[:lower:]' '[:upper:]')
+    export "CC_$under=$clang" "AR_$under=$bin/llvm-ar" "CARGO_TARGET_${upper}_LINKER=$clang"
+    cargo build --locked --release --bin chat-json --target "$1"
+    ls -l "../target/$1/release/chat-json"
+
+# Run chat-json: one room, driven over JSON Lines on stdin and stdout
+[group('build')]
+json *args:
+    cargo run --quiet --release --bin chat-json -- "$@"
+
+# The API documentation, opened in a browser
+[group('build')]
+doc:
+    cargo doc --no-deps --open
+
+# Remove this crate's build output (the workspace shares one target folder)
+[group('build')]
+clean:
+    cargo clean -p chat-core
+
+# ---------------------------------------------------------------------------------------------
+# Test
+
+# Unit, known-answer, simulated-network and relay tests
+[group('test')]
+test *args:
+    cargo test "$@"
+
+# Formatting, then clippy with warnings as errors
+[group('test')]
+lint:
+    cargo fmt --check
+    cargo clippy --all-targets -- -D warnings
+
+# Format the code
+[group('test')]
+fmt:
+    cargo fmt
+
+# Two peers talking through fast rekeys, with every handshake step printed (a diagnostic)
+[group('test')]
+trace:
+    cargo test --test trace_rekey -- --ignored --nocapture
+
+# ---------------------------------------------------------------------------------------------
+# Interop: real processes, and over the live Tor network. `peer` is the chat-json the second
+# process runs (another build, say); by default this one.
+
+# Rounds between two processes in one room over loopback UDP: handshakes, messages, DMs, replies, leaving
+[group('interop')]
+interop rounds="4" peer="../target/debug/chat-json":
+    cargo build --bin chat-json
+    python3 -I tests/interop/interop.py tests/interop ../target/debug/chat-json "$2" "$1"
+
+# Files between two processes both ways: saved and shown, cleaned pictures, fast and normal rate, withdrawn
+[group('interop')]
+interop-files peer="../target/debug/chat-json":
+    cargo build --bin chat-json
+    python3 -I tests/interop/files.py tests/interop ../target/debug/chat-json "$1" tests/data/pictures
+
+# :move between two processes: each moves the room, the other follows, codes stay compared
+[group('interop')]
+interop-move peer="../target/debug/chat-json":
+    cargo build --bin chat-json
+    python3 -I tests/interop/move.py tests/interop ../target/debug/chat-json "$1"
+
+# Two processes talking through constant rekeys (every 30 s), with latencies
+[group('interop')]
+interop-rekey seconds="240" peer="../target/debug/chat-json":
+    cargo build --bin chat-json
+    python3 -I tests/interop/rekey2.py tests/interop ../target/debug/chat-json "$2" "$1"
+
+# Two rooms meeting over the live Tor network, through onion services only
+[group('interop')]
+tor-pair:
+    cargo build --release --bin chat-json
+    python3 -I tests/interop/tor_pair.py tests/interop ../target/release/chat-json off

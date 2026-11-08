@@ -1,0 +1,40 @@
+[package]
+name = "chat-tui"
+description = "chat in the terminal, built on chat-core"
+version.workspace = true
+edition = "2024"
+authors = ["finlay@tuta.com"]
+license = "GPL-3.0-only"
+rust-version = "1.92"
+
+[[bin]]
+name = "chat"
+path = "src/main.rs"
+
+[dependencies]
+# chat-core's source next to this folder.
+chat-core = { path = "../chat-core" }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+ratatui = "0.30"
+crossterm = "0.29"
+unicode-width = "0.2"
+zeroize = "1.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The console, notifications, the clipboard and opening links.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

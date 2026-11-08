@@ -1,0 +1,8 @@
+# The Rust releases are built with. Building the same commit with it (and the zig in
+# .github/workflows/build.yml) gives the same binaries anywhere, which `just reproduce` and the
+# release workflow check. Raise it in its own commit, with the zig and cargo-zigbuild there.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-musl", "x86_64-pc-windows-gnu"]

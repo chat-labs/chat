@@ -1,0 +1,54 @@
+[package]
+name = "chat-core"
+description = "chat's core: the protocol engine, and the runtime that puts it on Tor, Nostr and UDP"
+version.workspace = true
+edition = "2024"
+authors = ["finlay@tuta.com"]
+license = "GPL-3.0-only"
+rust-version = "1.92"
+
+[dependencies]
+# Audited cryptography, linked statically so the binaries need nothing installed: libsodium (for
+# symmetric crypto, hashing and signatures), AWS-LC (FIPS 140-3 validated, for ML-KEM and TLS), and Bitcoin
+# Core's libsecp256k1 (Nostr's BIP-340 signatures).
+libsodium-sys-stable = "1.24"
+aws-lc-rs = "1.19"
+secp256k1 = "0.33"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
+webpki-roots = "1.0"
+tokio = { version = "1.54", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util", "io-std"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "__rustls-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+socket2 = { version = "0.6", features = ["all"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1.9", features = ["derive"] }
+thiserror = "2"
+# Tor, embedded: the Tor Project's own Rust implementation, so nothing needs installing. Pinned:
+# hosting a service with our own key and the in-memory keystore are Arti's experimental APIs.
+arti-client = { version = "=0.47.0", default-features = false, features = ["tokio", "rustls", "compression", "static-sqlite", "onion-service-client", "onion-service-service", "vanguards", "keymgr", "experimental-api", "ephemeral-keystore", "pt-client"] }
+tor-hsservice = "=0.47.0"
+tor-hscrypto = "=0.47.0"
+tor-llcrypto = "=0.47.0"
+tor-cell = "=0.47.0"
+tor-proto = "=0.47.0"
+tor-keymgr = { version = "=0.47.0", features = ["ephemeral-keystore"] }
+tor-config = "=0.47.0"
+tor-rtcompat = { version = "=0.47.0", default-features = false, features = ["tokio", "rustls"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The device lock (NCrypt and DPAPI) and security keys (webauthn.dll).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Networking_WindowsWebServices",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tokio = { version = "1.54", features = ["test-util"] }

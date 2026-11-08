@@ -1,0 +1,90 @@
+set positional-arguments
+
+# List recipes
+default:
+    @just --list --unsorted
+
+# ---------------------------------------------------------------------------------------------
+# Build
+
+# Build chat (the TUI): debug (default), release, or dist
+[group('build')]
+build profile="debug":
+    #!/bin/sh
+    set -eu
+    case "$1" in
+        debug) cargo build ;;
+        release) cargo build --release && ls -lh ../target/release/chat ;;
+        dist) cargo build --profile dist && ls -lh ../target/dist/chat ;;
+        *) echo "just build takes debug, release, or dist, not $1" >&2; exit 1 ;;
+    esac
+
+# Fast type-check without code generation
+[group('build')]
+check:
+    cargo check
+
+# A static Linux chat that runs anywhere (needs the musl target and a musl C compiler)
+[group('build')]
+static:
+    cargo build --release --target x86_64-unknown-linux-musl
+    ls -lh ../target/x86_64-unknown-linux-musl/release/chat
+
+# Install chat in ~/.cargo/bin
+[group('build')]
+install:
+    cargo install --locked --path .
+
+# Remove this crate's build output (the workspace shares one target folder)
+[group('build')]
+clean:
+    cargo clean -p chat-tui
+
+# ---------------------------------------------------------------------------------------------
+# Run
+
+# Run chat with the given options (Tor by default; --help lists them)
+[group('run')]
+run *args:
+    cargo run --release -- "$@"
+
+# Run chat in debug mode (fastest incremental compile)
+[group('run')]
+run-dev *args:
+    cargo run -- "$@"
+
+# Two TUIs side by side in tmux, talking over loopback, with nothing leaving this machine
+[group('run')]
+demo:
+    #!/bin/sh
+    set -eu
+    command -v tmux >/dev/null || { echo "just demo needs tmux" >&2; exit 1; }
+    cargo build --release
+    chat="$(cd .. && pwd)/target/release/chat"
+    flags="--direct --relays off --no-dht --no-lan"
+    tmux kill-session -t chat-demo 2>/dev/null || true
+    tmux new-session -d -s chat-demo -x 200 -y 50 "$chat --nick alice $flags --port 47701 --peer 127.0.0.1:47702 --join 'DEMOROOM22 demo'"
+    tmux split-window -h -t chat-demo "$chat --nick bob $flags --port 47702 --peer 127.0.0.1:47701 --join 'DEMOROOM22 demo'"
+    # Each starts on the settings page, and Esc starts it.
+    sleep 1
+    for pane in $(tmux list-panes -t chat-demo -F '#{pane_id}'); do tmux send-keys -t "$pane" Escape; done
+    if [ -n "${TMUX:-}" ]; then tmux switch-client -t chat-demo; else tmux attach -t chat-demo; fi
+
+# ---------------------------------------------------------------------------------------------
+# Test
+
+# The TUI's own tests (`just test` at the top runs every crate's)
+[group('test')]
+test *args:
+    cargo test "$@"
+
+# Formatting, then clippy with warnings as errors
+[group('test')]
+lint:
+    cargo fmt --check
+    cargo clippy --all-targets -- -D warnings
+
+# Format the code
+[group('test')]
+fmt:
+    cargo fmt

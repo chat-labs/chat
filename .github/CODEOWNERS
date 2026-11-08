@@ -1,0 +1,7 @@
+*               @chat-labs/admin
+
+/chat-core/     @chat-labs/core
+/chat-tui/      @chat-labs/tui
+/chat-gui/      @chat-labs/gui
+
+/.github/       @chat-labs/admin
