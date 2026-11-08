@@ -17,6 +17,7 @@ on:
       - Cargo.lock
       - rust-toolchain.toml
       - .cargo/**
+      - macos-sdk/**
       - justfile
       - .github/workflows/build.yml
   schedule:
@@ -92,3 +93,23 @@ jobs:
             echo "::error::two builds of the same commit differ - the build isn't reproducible"
             exit 1
           fi
+
+  # The Mac builds are cross-built against macos-sdk/'s stubs, so only a Mac shows the frameworks
+  # they name load. Intel's runs under Rosetta.
+  macos:
+    name: The Mac builds start on a Mac
+    needs: dist
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-0
+      - run: |
+          chmod +x chat-macos-aarch64 chat-macos-x86_64
+          ./chat-macos-aarch64 --version
+          arch -x86_64 ./chat-macos-x86_64 --version
+      # A release appends its list of builds after each binary's code signature.
+      - run: |
+          for f in chat-macos-aarch64 chat-macos-x86_64; do printf 'chat v0\n%08dCHATBLD1' 8 >> "$f"; done
+          ./chat-macos-aarch64 --version
+          arch -x86_64 ./chat-macos-x86_64 --version

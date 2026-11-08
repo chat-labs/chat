@@ -4,9 +4,12 @@ set positional-arguments
 # their notes from.
 version := `sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1`
 changelog := "chat-tui/CHANGELOG.md"
-# The binaries a release publishes (`just dist` puts them in dist/), and peers' build check lists:
-# 3 at most, which is all its list in "v" holds.
-binaries := "chat-linux-x86_64 chat-windows-x86_64.exe"
+# The binaries a release publishes (`just dist` puts them in dist/). Each carries the signed list
+# of builds peers check its build against, which names 3 at most, all "v" holds: BUILDS for Linux
+# and Windows, BUILDS-macos for the Macs.
+pc_binaries := "chat-linux-x86_64 chat-windows-x86_64.exe"
+mac_binaries := "chat-macos-aarch64 chat-macos-x86_64"
+binaries := pc_binaries + " " + mac_binaries
 
 # Each crate's own recipes: `just core::interop`, `just tui::demo`, and so on
 mod core 'chat-core'
@@ -90,13 +93,24 @@ dist:
     export SOURCE_DATE_EPOCH RUSTFLAGS
     cargo zigbuild --locked -p chat-tui --profile dist --target x86_64-unknown-linux-musl
     cargo zigbuild --locked -p chat-tui --profile dist --target x86_64-pc-windows-gnu
+    # zig has no Apple SDK, so the frameworks a crate links come from macos-sdk/: stubs that only
+    # say where each is on a Mac, since chat uses none of their symbols. They run on macOS 11 on.
+    for t in aarch64-apple-darwin x86_64-apple-darwin; do
+        MACOSX_DEPLOYMENT_TARGET=11.0 RUSTFLAGS="$RUSTFLAGS -C link-arg=-F$PWD/macos-sdk/System/Library/Frameworks" \
+            cargo zigbuild --locked -p chat-tui --profile dist --target "$t"
+    done
     rm -rf dist
     mkdir dist
     cp target/x86_64-unknown-linux-musl/dist/chat dist/chat-linux-x86_64
     cp target/x86_64-pc-windows-gnu/dist/chat.exe dist/chat-windows-x86_64.exe
+    cp target/aarch64-apple-darwin/dist/chat dist/chat-macos-aarch64
+    cp target/x86_64-apple-darwin/dist/chat dist/chat-macos-x86_64
     (cd dist && sha256sum {{binaries}} > SHA256SUMS)
-    (cd dist && { echo "chat v{{version}}"; sha256sum {{binaries}} | cut -c1-64; } > BUILDS)
-    test "$(wc -l < dist/BUILDS)" -le 4 || { echo "BUILDS names more than 3 binaries, all peers' list holds" >&2; exit 1; }
+    (cd dist && { echo "chat v{{version}}"; sha256sum {{pc_binaries}} | cut -c1-64; } > BUILDS)
+    (cd dist && { echo "chat v{{version}}"; sha256sum {{mac_binaries}} | cut -c1-64; } > BUILDS-macos)
+    for l in BUILDS BUILDS-macos; do
+        test "$(wc -l < "dist/$l")" -le 4 || { echo "$l names more than 3 binaries, all peers' list holds" >&2; exit 1; }
+    done
     echo "dist/ ready for v{{version}}"
 
 # A published binary's SHA-256 without the list of builds `just release` appended to it, which is
@@ -158,16 +172,18 @@ verify version:
 # Peers send each other this list to check each other's builds with, so it may name 3 binaries at
 # most. chat reads it from its own end: the list, its signature line, then the length of both in 8
 # digits and CHATBLD1.
-# Append BUILDS, signed (BUILDS.minisig), to the binaries in a folder
-_append-list dir:
+# Append LIST, signed (LIST.minisig), to the binaries it names, in a folder
+_append-list dir list +files:
     #!/bin/sh
     set -eu
-    cd {{quote(dir)}}
-    test "$(wc -l < BUILDS)" -le 4 || { echo "BUILDS names more than 3 binaries" >&2; exit 1; }
-    sig=$(sed -n 2p BUILDS.minisig)
-    len=$(( $(wc -c < BUILDS) + ${#sig} + 1 ))
-    for f in {{binaries}}; do
-        { cat BUILDS; printf '%s\n%08dCHATBLD1' "$sig" "$len"; } >> "$f"
+    cd "$1"
+    list="$2"
+    shift 2
+    test "$(wc -l < "$list")" -le 4 || { echo "$list names more than 3 binaries" >&2; exit 1; }
+    sig=$(sed -n 2p "$list.minisig")
+    len=$(( $(wc -c < "$list") + ${#sig} + 1 ))
+    for f in "$@"; do
+        { cat "$list"; printf '%s\n%08dCHATBLD1' "$sig" "$len"; } >> "$f"
     done
 
 # Release preconditions
@@ -388,11 +404,14 @@ _publish version:
     test "$(git rev-parse HEAD)" = "$(git rev-parse "v$v^{commit}")" || { echo "HEAD is not tag v$v" >&2; exit 1; }
 
     "$just" dist
-    # Each binary gets the signed list of this release's binaries, which peers check builds with.
-    # SHA256SUMS then covers the binaries as published, list included. Two signatures: two prompts.
-    minisign -S -s "$key" -m dist/BUILDS -t "chat builds v$v"
+    # Each binary gets the signed list of its builds, which peers check builds with: BUILDS for
+    # Linux and Windows, BUILDS-macos for the Macs. SHA256SUMS then covers the binaries as
+    # published, lists included. One minisign signs both lists: two prompts in all.
+    minisign -S -s "$key" -m dist/BUILDS dist/BUILDS-macos -t "chat builds v$v"
     "$just" _signed-by dist/BUILDS >/dev/null
-    "$just" _append-list dist
+    "$just" _signed-by dist/BUILDS-macos >/dev/null
+    "$just" _append-list dist BUILDS {{pc_binaries}}
+    "$just" _append-list dist BUILDS-macos {{mac_binaries}}
     (cd dist && sha256sum {{binaries}} > SHA256SUMS)
     minisign -S -s "$key" -m dist/SHA256SUMS -t "chat v$v"
     pub=$("$just" _signed-by dist/SHA256SUMS)
