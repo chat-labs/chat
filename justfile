@@ -95,8 +95,10 @@ dist:
     cargo zigbuild --locked -p chat-tui --profile dist --target x86_64-pc-windows-gnu
     # zig has no Apple SDK, so the frameworks a crate links come from macos-sdk/: stubs that only
     # say where each is on a Mac, since chat uses none of their symbols. They run on macOS 11 on.
+    # -S keeps debug info out at link time: the linker hashes its output into the binary's UUID, and
+    # the debug info names each object file's path and modification time, which no two builds share.
     for t in aarch64-apple-darwin x86_64-apple-darwin; do
-        MACOSX_DEPLOYMENT_TARGET=11.0 RUSTFLAGS="$RUSTFLAGS -C link-arg=-F$PWD/macos-sdk/System/Library/Frameworks" \
+        MACOSX_DEPLOYMENT_TARGET=11.0 RUSTFLAGS="$RUSTFLAGS -C link-arg=-F$PWD/macos-sdk/System/Library/Frameworks -C link-arg=-Wl,-S" \
             cargo zigbuild --locked -p chat-tui --profile dist --target "$t"
     done
     rm -rf dist
