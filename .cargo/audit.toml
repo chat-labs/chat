@@ -1,0 +1,9 @@
+[advisories]
+ignore = [
+    # rsa, the Marvin attack: no fixed release exists. It needs an RSA private key to time, and
+    # there is none here: arti, which brings the crate in, only checks relays' RSA signatures.
+    "RUSTSEC-2023-0071",
+    # crypto-bigint 0.5: it's in Cargo.lock only, through elliptic-curve, and nothing in the
+    # workspace builds it (`cargo tree -i elliptic-curve --target all -e all` prints nothing).
+    "RUSTSEC-2026-0387",
+]

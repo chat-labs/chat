@@ -7,12 +7,14 @@ on:
     paths:
       - "**/Cargo.toml"
       - Cargo.lock
+      - .cargo/audit.toml
       - .github/workflows/audit.yml
   push:
     branches: [main]
     paths:
       - "**/Cargo.toml"
       - Cargo.lock
+      - .cargo/audit.toml
   schedule:
     - cron: "7 5 * * *"
   workflow_dispatch:
