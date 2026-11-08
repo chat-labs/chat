@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0-alpha.1
+## 0.6.0
 
 - chat in the terminal, built on chat-core: rooms with no server and no accounts, end-to-end
   encrypted, through Tor by default (built in, nothing to install), or direct for speed.
