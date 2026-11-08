@@ -197,6 +197,13 @@ _can-release:
     gh auth status >/dev/null 2>&1 || { echo "gh isn't logged in - run gh auth login" >&2; exit 1; }
     command -v cargo-zigbuild >/dev/null || { echo "no cargo-zigbuild - see README.md" >&2; exit 1; }
 
+# What `just prepare` needs: a clean tree, and gh, to see what's published
+_can-prepare:
+    #!/bin/sh
+    set -eu
+    test -z "$(git status --porcelain)" || { echo "working tree not clean" >&2; exit 1; }
+    gh auth status >/dev/null 2>&1 || { echo "gh isn't logged in - run gh auth login" >&2; exit 1; }
+
 # Every crate's version (the workspace's), and Cargo.lock's record of it
 _set-version version:
     #!/bin/sh
@@ -205,33 +212,33 @@ _set-version version:
     mv Cargo.toml.tmp Cargo.toml
     cargo update --workspace --offline -q
 
-#   just release patch            the patch after the last release, 0.6.0 -> 0.6.1
-#   just release minor            the minor after it, 0.6.0 -> 0.7.0
-#   just release major            the major after it, 0.6.0 -> 1.0.0
-#   just release                  the version in Cargo.toml without its pre-release, which finishes
+#   just prepare patch            the patch after the last release, 0.6.0 -> 0.6.1
+#   just prepare minor            the minor after it, 0.6.0 -> 0.7.0
+#   just prepare major            the major after it, 0.6.0 -> 1.0.0
+#   just prepare                  the version in Cargo.toml without its pre-release, which finishes
 #                                 its betas, or the patch after it once that one is published
-#   just release 1.0.0            another version
-#   just release beta [KIND]      a beta of the version just release KIND would release, see
-#                                 _release-beta
-# Releases the sections at the top of the changelog, "## Unreleased" and those of the betas (and
-# pre-releases) since the last release, as VERSION: they become one "## VERSION" (see
-# _fold-changelog), Cargo.toml gets the version, and they're committed and tagged vVERSION. Betas
-# of another version are folded in too, so a cycle of 0.6.1 betas can come out as 0.7.0. Nothing
-# is pushed until SHA256SUMS is signed; if a later step fails, running the same again picks up
-# from the tag.
-# Build, sign and publish a release: patch, minor, major, or beta [KIND] (needs zig, minisign, gh)
+#   just prepare 1.0.0            another version
+#   just prepare beta [KIND]      a beta of the version just prepare KIND would get ready, see
+#                                 _prepare-beta
+# Gets the sections at the top of the changelog, "## Unreleased" and those of the betas (and
+# pre-releases) since the last release, ready to release as VERSION: they become one
+# "## VERSION" (see _fold-changelog), and Cargo.toml gets the version. Betas of another version
+# are folded in too, so a cycle of 0.6.1 betas can come out as 0.7.0. It prints the version and
+# commits nothing: the Prepare release workflow runs it and opens the release's pull request, and
+# once that's merged, `just release` publishes it.
+# Get the changelog and version ready for a release: patch, minor, major, or beta [KIND]
 [group('release')]
-release what="" *args: _can-release
+prepare what="" *args: _can-prepare
     #!/bin/sh
     set -eu
     just={{quote(just_executable())}}
     log={{quote(changelog)}}
     if [ "${1:-}" = beta ]; then
         shift
-        if [ $# -gt 1 ]; then echo "just release beta takes patch, minor, major or a version, not $*" >&2; exit 1; fi
-        exec "$just" _release-beta "$@"
+        if [ $# -gt 1 ]; then echo "just prepare beta takes patch, minor, major or a version, not $*" >&2; exit 1; fi
+        exec "$just" _prepare-beta "$@"
     fi
-    if [ $# -gt 1 ]; then echo "just release takes patch, minor, major, beta or a version, not $*" >&2; exit 1; fi
+    if [ $# -gt 1 ]; then echo "just prepare takes patch, minor, major, beta or a version, not $*" >&2; exit 1; fi
     base_version() { sed -n 's/^version = "\([0-9.]*\).*"$/\1/p' Cargo.toml | head -n 1; }
     published() { gh release view "v$1" >/dev/null 2>&1; }
     pending() { awk '/^## [0-9]+\.[0-9]+\.[0-9]+$/ { exit } /^## / { printf "%s%s", (n++ ? ", " : ""), substr($0, 4) }' "$log"; }
@@ -243,33 +250,27 @@ release what="" *args: _can-release
     if [ "$older" = "$v" ] && [ "$v" != "$(base_version)" ]; then
         echo "v$v is older than $(base_version), the version in Cargo.toml" >&2; exit 1
     fi
-
-    if [ -n "$(pending)" ]; then
-        if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
-            echo "tag v$v already exists, but $log still has $(pending) above it" >&2; exit 1
-        fi
-        if grep -q "^## $v\$" "$log"; then echo "$log already has a section for $v" >&2; exit 1; fi
-        awk '/^## [0-9]+\.[0-9]+\.[0-9]+$/ { exit } /^## / { on = 1; next } on && /[^[:space:]]/ { found = 1 } END { exit !found }' \
-            "$log" || { echo "$log's $(pending) has nothing in it" >&2; exit 1; }
-        echo "releasing $log's $(pending) as v$v"
-        "$just" _fold-changelog "$v"
-        "$just" _set-version "$v"
-        git commit -q -m "Release $v" "$log" Cargo.toml Cargo.lock
-        git tag "v$v"
+    test -n "$(pending)" || { echo "$log has no Unreleased or beta section to release" >&2; exit 1; }
+    if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+        echo "tag v$v already exists, but $log still has $(pending) above it" >&2; exit 1
     fi
-    git rev-parse -q --verify "refs/tags/v$v" >/dev/null \
-        || { echo "no tag v$v and no Unreleased section in $log to release" >&2; exit 1; }
-    exec "$just" _publish "$v"
+    if grep -q "^## $v\$" "$log"; then echo "$log already has a section for $v" >&2; exit 1; fi
+    awk '/^## [0-9]+\.[0-9]+\.[0-9]+$/ { exit } /^## / { on = 1; next } on && /[^[:space:]]/ { found = 1 } END { exit !found }' \
+        "$log" || { echo "$log's $(pending) has nothing in it" >&2; exit 1; }
+    echo "getting $log's $(pending) ready as v$v" >&2
+    "$just" _fold-changelog "$v"
+    "$just" _set-version "$v"
+    echo "$v"
 
 # A beta is for testers: tagged vVERSION-beta.N, signed and published like a release, but as a
 # GitHub pre-release, which /update only installs with betas on (/set betas on). Testers turn
 # that on or download it, and /update takes them on to VERSION once it's released. Releasing
 # VERSION, or one after it, deletes the betas' GitHub releases, but not their tags. VERSION is
-# the one `just release KIND` would release (see _next-version), so with no KIND it's the betas'
+# the one `just prepare KIND` would get ready (see _next-version), so with no KIND it's the betas'
 # own, and N counts up from 1 (or picks up a beta whose publishing failed). "## Unreleased" becomes
 # "## VERSION-beta.N" and Cargo.toml gets VERSION-beta.N.
-# Build, sign and publish a beta of the next release, or of KIND's (patch, minor, major or a version)
-_release-beta kind="":
+# Get the changelog and version ready for a beta of the next release, or of KIND's
+_prepare-beta kind="":
     #!/bin/sh
     set -eu
     just={{quote(just_executable())}}
@@ -294,29 +295,47 @@ _release-beta kind="":
     v="$base-beta.$n"
     # Peers drop a version longer than 15 characters, and with it the build check.
     test ${#v} -le 15 || { echo "$v is longer than the 15 characters peers take" >&2; exit 1; }
-
-    if grep -q '^## Unreleased$' "$log"; then
-        if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
-            echo "tag v$v already exists, but $log still has an Unreleased section" >&2; exit 1
-        fi
-        awk '$0 == "## Unreleased" { on = 1; next } on && /^## / { exit } on && /[^[:space:]]/ { found = 1 } END { exit !found }' \
-            "$log" || { echo "the Unreleased section of $log is empty" >&2; exit 1; }
-        echo "releasing the Unreleased changes as beta v$v"
-        awk -v v="$v" '$0 == "## Unreleased" && !done { print "## " v; done = 1; next } { print }' "$log" > "$log.tmp"
-        mv "$log.tmp" "$log"
-        "$just" _set-version "$v"
-        git commit -q -m "Release $v" "$log" Cargo.toml Cargo.lock
-        git tag "v$v"
+    grep -q '^## Unreleased$' "$log" || { echo "$log has no Unreleased section to release as a beta" >&2; exit 1; }
+    if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+        echo "tag v$v already exists, but $log still has an Unreleased section" >&2; exit 1
     fi
-    git rev-parse -q --verify "refs/tags/v$v" >/dev/null \
-        || { echo "no tag v$v and no Unreleased section in $log to release" >&2; exit 1; }
+    awk '$0 == "## Unreleased" { on = 1; next } on && /^## / { exit } on && /[^[:space:]]/ { found = 1 } END { exit !found }' \
+        "$log" || { echo "the Unreleased section of $log is empty" >&2; exit 1; }
+    echo "getting the Unreleased changes ready as beta v$v" >&2
+    awk -v v="$v" '$0 == "## Unreleased" && !done { print "## " v; done = 1; next } { print }' "$log" > "$log.tmp"
+    mv "$log.tmp" "$log"
+    "$just" _set-version "$v"
+    echo "$v"
+
+# Once the pull request `just prepare` (or the Prepare release workflow) made is merged: VERSION is
+# Cargo.toml's, and HEAD must be on GitHub's main, so what's released is what was merged. HEAD is
+# tagged vVERSION, then built, signed and published, a beta as a pre-release. Only the tag is
+# pushed, and not until SHA256SUMS is signed; if a later step fails, running it again picks up
+# from the tag.
+# Build, sign and publish the release main is ready for (needs zig, minisign, gh)
+[group('release')]
+release: _can-release
+    #!/bin/sh
+    set -eu
+    just={{quote(just_executable())}}
+    log={{quote(changelog)}}
+    v={{quote(version)}}
+    if gh release view "v$v" >/dev/null 2>&1; then
+        echo "v$v is already published - just prepare, or the Prepare release workflow, gets the next one ready" >&2; exit 1
+    fi
+    test "$(sed -n 's/^## //p' "$log" | head -n 1)" = "$v" \
+        || { echo "$log's newest section isn't $v's - merge v$v's release pull request first" >&2; exit 1; }
+    git fetch -q origin main
+    git merge-base --is-ancestor HEAD FETCH_HEAD \
+        || { echo "HEAD isn't on GitHub's main - merge the release pull request, then pull" >&2; exit 1; }
+    git rev-parse -q --verify "refs/tags/v$v" >/dev/null || git tag "v$v"
     exec "$just" _publish "$v"
 
 # patch, minor and major count on from the last release published on GitHub (not this clone's
 # tags, which needn't hold the releases), so after a failed publish the same KIND comes to the
 # same version again. With no KIND it's the version in Cargo.toml without its pre-release, or the
 # patch after it once that one is published. Anything else is taken as the version.
-# Print the version `just release KIND` releases
+# Print the version `just prepare KIND` gets ready
 _next-version kind="":
     #!/bin/sh
     set -eu
@@ -428,9 +447,8 @@ _publish version:
         echo '```'
     } >> dist/notes.md
 
-    # The branch goes too when there is one, so the release commit is on GitHub, not just its tag.
-    branch=$(git symbolic-ref -q --short HEAD || true)
-    git push --atomic origin ${branch:+"$branch"} "refs/tags/v$v"
+    # The release commit came through its pull request, so it's on GitHub already: only the tag goes.
+    git push origin "refs/tags/v$v"
     case "$v" in *-*) pre=--prerelease ;; *) pre= ;; esac
     (cd dist && gh release create "v$v" --title "v$v" --notes-file notes.md --verify-tag ${pre:+"$pre"} \
         {{binaries}} SHA256SUMS SHA256SUMS.minisig)
