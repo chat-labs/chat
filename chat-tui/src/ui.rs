@@ -1014,6 +1014,22 @@ fn modal_dialog(app: &App, m: &Modal) -> (Dialog, &'static str) {
             (d, "SETTINGS")
         }
         Modal::Rooms { sel, forgetting } => (rooms_dialog(app, *sel, *forgetting), "JOIN"),
+        Modal::PickSave { names, sel } => {
+            let (esc, skip) = if app.start.is_some() {
+                ("Esc starts without any", "esc skip")
+            } else {
+                ("Esc cancels", "esc cancel")
+            };
+            let d = Dialog {
+                title: "UNLOCK".into(),
+                text: paras(&[format!("Your saves. Enter opens one; {esc}.")]),
+                items: names.iter().map(|n| (n.clone(), String::new())).collect(),
+                sel: Some(*sel),
+                keys: format!("enter open \u{b7} {skip}"),
+                ..Dialog::default()
+            };
+            (d, "UNLOCK")
+        }
         Modal::Link { links, at } => {
             let (link, who, when) = &links[*at];
             let target = chat_core::protocol::text::link_target(link);
@@ -1115,7 +1131,6 @@ fn prompt_dialog(app: &App, kind: &PromptKind, title: &str, hint: &str, input: &
         PromptKind::NewRoom => ("password".into(), "enter create \u{b7} esc cancel".into(), "NEW"),
         PromptKind::JoinId => ("session id, or an invite".into(), "enter next \u{b7} esc cancel".into(), "JOIN"),
         PromptKind::JoinPassword(_) => ("password".into(), "enter join \u{b7} esc cancel".into(), "JOIN"),
-        PromptKind::PickSave => ("the save's name".into(), format!("enter open \u{b7} {skip}"), "UNLOCK"),
         PromptKind::Unlock(_) => ("passphrase".into(), format!("enter open \u{b7} {skip}"), "UNLOCK"),
         PromptKind::Code => ("6-digit code".into(), format!("enter open \u{b7} {skip}"), "UNLOCK"),
         PromptKind::KeyPin(Some(_)) => ("PIN".into(), "enter send \u{b7} esc cancel".into(), "UNLOCK"),
