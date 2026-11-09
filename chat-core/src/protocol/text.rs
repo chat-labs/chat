@@ -484,9 +484,100 @@ pub fn link_target(link: &str) -> String {
     out
 }
 
+/// What a part of a line of chat's own text (a note, or the network's log) is, for an interface to
+/// set it apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// A command to type: "/invite".
+    Command,
+    /// Where a peer is: "192.0.2.7:5000", "[2001:db8::1]:5000", "abc...xyz.onion".
+    Address,
+    /// A file or folder: "~/Downloads/a.png".
+    Path,
+    /// A count, a size, a share: "3", "2/5", "45%", "1.5".
+    Number,
+    /// An invite to a room, password and all.
+    Invite,
+    /// The "warning:" a line starts with.
+    Warning,
+}
+
+/// The parts of a line of chat's own text worth setting apart, as (start, length, what) in bytes,
+/// in order. Each is a whole word, without the brackets or punctuation around it. Peers' text
+/// isn't read this way: it's theirs, and anything in it could look like anything.
+// shortcut: words split at spaces, so a path with a space is marked up to it, and "/tmp" alone reads
+// as a command; mark from the line's own parts if notes ever carry them.
+pub fn console_marks(text: &str) -> Vec<(usize, usize, Mark)> {
+    let mut out = Vec::new();
+    if text.starts_with("warning:") {
+        out.push((0, "warning:".len(), Mark::Warning));
+    }
+    let mut at = 0;
+    for word in text.split(' ') {
+        let start = at;
+        at += word.len() + 1;
+        let lead = word.len() - word.trim_start_matches(['(', '"', '\'']).len();
+        let w = word[lead..].trim_end_matches([')', '"', '\'', ',', '.', ';', ':', '!', '?']);
+        if let Some(m) = word_mark(w) {
+            out.push((start + lead, w.len(), m));
+        }
+    }
+    out
+}
+
+fn word_mark(w: &str) -> Option<Mark> {
+    let b = w.as_bytes();
+    let first = *b.first()?;
+    let host = w
+        .rsplit_once(':')
+        .filter(|(_, port)| port.parse::<u16>().is_ok())
+        .map_or(w, |(h, _)| h);
+    if first == b'/' && b.len() > 1 && b[1..].iter().all(u8::is_ascii_lowercase) {
+        Some(Mark::Command)
+    } else if w.len() > "chat:".len() && crate::protocol::names::is_invite(w) {
+        Some(Mark::Invite)
+    } else if w.parse::<std::net::SocketAddr>().is_ok()
+        || w.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().is_ok()
+        || host.len() > ".onion".len() && host.ends_with(".onion")
+    {
+        Some(Mark::Address)
+    } else if w.starts_with("~/") || w.starts_with("./") || first == b'/' && w[1..].contains('/') {
+        Some(Mark::Path)
+    } else if first.is_ascii_digit() && b.iter().all(|c| c.is_ascii_digit() || b".,/%".contains(c)) {
+        Some(Mark::Number)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marks_console_lines() {
+        let marks = |t: &'static str| -> Vec<(&str, Mark)> { console_marks(t).into_iter().map(|(a, n, m)| (&t[a..a + n], m)).collect() };
+        assert_eq!(
+            marks("hi to alice (192.0.2.7:5000, try 2/5)"),
+            [("192.0.2.7:5000", Mark::Address), ("2/5", Mark::Number)]
+        );
+        assert_eq!(marks("warning: bob no longer signs"), [("warning:", Mark::Warning)]);
+        assert_eq!(
+            marks("/invite copies it. Compare codes (/verify NAME)."),
+            [("/invite", Mark::Command), ("/verify", Mark::Command)]
+        );
+        assert_eq!(
+            marks("saved file 3 to ~/Downloads/a.png."),
+            [("3", Mark::Number), ("~/Downloads/a.png", Mark::Path)]
+        );
+        assert_eq!(
+            marks("from [2001:db8::1]:5000 and abcdefgh.onion:80"),
+            [("[2001:db8::1]:5000", Mark::Address), ("abcdefgh.onion:80", Mark::Address)]
+        );
+        assert_eq!(marks("share this invite: chat:room:pw:x"), [("chat:room:pw:x", Mark::Invite)]);
+        // Words that only have digits in them, and bare words: nothing.
+        assert!(marks("hi2 f93d 8a1c udp/1234 lan: chat").is_empty());
+    }
 
     #[test]
     fn cleans_text() {

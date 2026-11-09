@@ -741,17 +741,40 @@ fn entry_lines(app: &App, r: &RoomView, e: &crate::app::Entry, w: usize) -> Vec<
             }
             lines
         }
-        EntryKind::Note(Level::Warn, text) => wrap(
-            &[
-                time,
-                (format!("! {text}"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ],
-            w,
-            8,
-        ),
-        EntryKind::Note(Level::Note, text) => wrap(&[time, (format!("· {text}"), faint())], w, 8),
-        EntryKind::Log(text) => wrap(&[time, (format!("net: {text}"), faint().add_modifier(Modifier::ITALIC))], w, 8),
+        EntryKind::Note(Level::Warn, text) => {
+            console_line(time, "! ", text, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD), w)
+        }
+        EntryKind::Note(Level::Note, text) => console_line(time, "\u{b7} ", text, faint(), w),
+        EntryKind::Log(text) => console_line(time, "net: ", text, faint().add_modifier(Modifier::ITALIC), w),
     }
+}
+
+/// A line of chat's own text, as the console shows it: the prose in `base`, and what chat-core
+/// marks in it brought out of the faint. Commands are in the accent, as keys are, addresses in
+/// blue, and values (numbers, paths, invites) in the terminal's own colour. A line that starts
+/// with "warning:" is yellow.
+fn console_line(time: (String, Style), lead: &str, text: &str, base: Style, w: usize) -> Vec<Line<'static>> {
+    use chat_core::protocol::text::{Mark, console_marks};
+    let marks = console_marks(text);
+    let base = match marks.first() {
+        Some((_, _, Mark::Warning)) => Style::default().fg(Color::Yellow),
+        _ => base,
+    };
+    let mut pieces = vec![time, (lead.to_string(), base)];
+    let mut at = 0;
+    for (a, n, m) in marks {
+        let st = match m {
+            Mark::Command => accent(),
+            Mark::Address => Style::default().fg(Color::Blue),
+            Mark::Warning => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Mark::Path | Mark::Number | Mark::Invite => Style::default(),
+        };
+        pieces.push((text[at..a].to_string(), base));
+        pieces.push((text[a..a + n].to_string(), base.patch(st.remove_modifier(Modifier::DIM))));
+        at = a + n;
+    }
+    pieces.push((text[at..].to_string(), base));
+    wrap(&pieces, w, 8)
 }
 
 /// The most rows a picture takes in the messages.
