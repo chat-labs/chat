@@ -494,7 +494,7 @@ pub enum Mark {
     Warning,
     /// A command to type: "/invite".
     Command,
-    /// Where a peer or a server is: "192.0.2.7:5000", "[2001:db8::1]:5000", "abc...xyz.onion",
+    /// Where a peer or a server is: "192.0.2.7:5000", "\[2001:db8::1\]:5000", "abc...xyz.onion",
     /// "relay.example.net".
     Address,
     /// A file or folder: "~/Downloads/a.png".
