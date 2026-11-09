@@ -1,5 +1,6 @@
 # The release binaries (`just dist`), built twice from the same commit on two different systems in
-# two different folders, which must give the same bytes: releases are signed offline, and anyone
+# two different folders, each binary in a job of its own so they build at once, which must give
+# the same bytes: releases are signed offline, and anyone
 # can check a published one against the source only because the build is reproducible. The
 # binaries are kept as artifacts, unsigned: chat's updater installs only what the release key signed.
 #
@@ -39,15 +40,20 @@ env:
 
 jobs:
   dist:
-    name: dist (${{ matrix.os }}, ${{ matrix.folder }})
+    name: ${{ matrix.binary }} (${{ matrix.os }}, ${{ matrix.folder }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       matrix:
+        build: [first, second]
+        # The justfile's binaries.
+        binary: [chat-linux-x86_64, chat-windows-x86_64.exe, chat-macos-aarch64, chat-macos-x86_64]
         include:
-          - os: ubuntu-24.04
+          - build: first
+            os: ubuntu-24.04
             folder: first
-          - os: ubuntu-26.04
+          - build: second
+            os: ubuntu-26.04
             folder: second/elsewhere
     defaults:
       run:
@@ -65,12 +71,13 @@ jobs:
         with:
           tool: just@${{ env.JUST_VERSION }},cargo-zigbuild@${{ env.ZIGBUILD_VERSION }}
       # No cache: each build starts from nothing, as one checking a release would.
-      - run: just dist
-      - run: cat dist/SHA256SUMS
+      - run: just _dist-build "$BINARY"
+        env:
+          BINARY: ${{ matrix.binary }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: dist-${{ strategy.job-index }}
-          path: ${{ matrix.folder }}/dist/
+          name: ${{ matrix.build }}-${{ matrix.binary }}
+          path: ${{ matrix.folder }}/dist/${{ matrix.binary }}
           retention-days: 30
           if-no-files-found: error
 
@@ -81,15 +88,24 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: dist-*
+          pattern: first-*
+          path: first
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: second-*
+          path: second
+          merge-multiple: true
       - run: |
+          (cd first && sha256sum -- *) > first.sums
+          (cd second && sha256sum -- *) > second.sums
           {
             echo '### Release binaries of this commit (unsigned)'
             echo '```'
-            cat dist-0/SHA256SUMS
+            cat first.sums
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          if ! diff dist-0/SHA256SUMS dist-1/SHA256SUMS; then
+          if ! diff first.sums second.sums; then
             echo "::error::two builds of the same commit differ - the build isn't reproducible"
             exit 1
           fi
@@ -103,7 +119,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: dist-0
+          pattern: first-chat-macos-*
+          merge-multiple: true
       - run: |
           chmod +x chat-macos-aarch64 chat-macos-x86_64
           ./chat-macos-aarch64 --version

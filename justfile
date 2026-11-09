@@ -80,33 +80,15 @@ _signed-by file:
     echo "$1 isn't signed with keys/minisign.pub's key or keys/minisign-backup.pub's" >&2
     exit 1
 
-# Paths in the binaries name no folder of this machine's, and the build stamp says when the commit
-# was made (SOURCE_DATE_EPOCH), so building the same commit again, anywhere, with the same Rust and
-# zig, gives the same binaries. Needs the targets and cargo-zigbuild (see README.md).
+# Needs the targets and cargo-zigbuild (see README.md).
 # Put standalone release binaries and SHA256SUMS in dist/
 [group('release')]
 dist:
     #!/bin/sh
     set -eu
-    SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
-    RUSTFLAGS="--remap-path-prefix=$PWD=. --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=cargo"
-    export SOURCE_DATE_EPOCH RUSTFLAGS
-    cargo zigbuild --locked -p chat-tui --profile dist --target x86_64-unknown-linux-musl
-    cargo zigbuild --locked -p chat-tui --profile dist --target x86_64-pc-windows-gnu
-    # zig has no Apple SDK, so the frameworks a crate links come from macos-sdk/: stubs that only
-    # say where each is on a Mac, since chat uses none of their symbols. They run on macOS 11 on.
-    # -S keeps debug info out at link time: the linker hashes its output into the binary's UUID, and
-    # the debug info names each object file's path and modification time, which no two builds share.
-    for t in aarch64-apple-darwin x86_64-apple-darwin; do
-        MACOSX_DEPLOYMENT_TARGET=11.0 RUSTFLAGS="$RUSTFLAGS -C link-arg=-F$PWD/macos-sdk/System/Library/Frameworks -C link-arg=-Wl,-S" \
-            cargo zigbuild --locked -p chat-tui --profile dist --target "$t"
-    done
+    just={{quote(just_executable())}}
     rm -rf dist
-    mkdir dist
-    cp target/x86_64-unknown-linux-musl/dist/chat dist/chat-linux-x86_64
-    cp target/x86_64-pc-windows-gnu/dist/chat.exe dist/chat-windows-x86_64.exe
-    cp target/aarch64-apple-darwin/dist/chat dist/chat-macos-aarch64
-    cp target/x86_64-apple-darwin/dist/chat dist/chat-macos-x86_64
+    for f in {{binaries}}; do "$just" _dist-build "$f"; done
     (cd dist && sha256sum {{binaries}} > SHA256SUMS)
     (cd dist && { echo "chat v{{version}}"; sha256sum {{pc_binaries}} | cut -c1-64; } > BUILDS)
     (cd dist && { echo "chat v{{version}}"; sha256sum {{mac_binaries}} | cut -c1-64; } > BUILDS-macos)
@@ -114,6 +96,38 @@ dist:
         test "$(wc -l < "dist/$l")" -le 4 || { echo "$l names more than 3 binaries, all peers' list holds" >&2; exit 1; }
     done
     echo "dist/ ready for v{{version}}"
+
+# Paths in the binaries name no folder of this machine's, and the build stamp says when the commit
+# was made (SOURCE_DATE_EPOCH), so building the same commit again, anywhere, with the same Rust and
+# zig, gives the same binaries. The Build workflow builds each in a job of its own.
+# Build release binary NAME, one of binaries, into dist/
+_dist-build name:
+    #!/bin/sh
+    set -eu
+    SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+    RUSTFLAGS="--remap-path-prefix=$PWD=. --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=cargo"
+    export SOURCE_DATE_EPOCH RUSTFLAGS
+    case "$1" in
+        chat-linux-x86_64) target=x86_64-unknown-linux-musl bin=chat ;;
+        chat-windows-x86_64.exe) target=x86_64-pc-windows-gnu bin=chat.exe ;;
+        chat-macos-aarch64) target=aarch64-apple-darwin bin=chat ;;
+        chat-macos-x86_64) target=x86_64-apple-darwin bin=chat ;;
+        *) echo "no release binary $1 - binaries are {{binaries}}" >&2; exit 1 ;;
+    esac
+    case "$target" in
+        # zig has no Apple SDK, so the frameworks a crate links come from macos-sdk/: stubs that only
+        # say where each is on a Mac, since chat uses none of their symbols. They run on macOS 11 on.
+        # -S keeps debug info out at link time: the linker hashes its output into the binary's UUID,
+        # and the debug info names each object file's path and modification time, which no two
+        # builds share.
+        *-apple-darwin)
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+            RUSTFLAGS="$RUSTFLAGS -C link-arg=-F$PWD/macos-sdk/System/Library/Frameworks -C link-arg=-Wl,-S"
+            ;;
+    esac
+    cargo zigbuild --locked -p chat-tui --profile dist --target "$target"
+    mkdir -p dist
+    cp "target/$target/dist/$bin" "dist/$1"
 
 # A published binary's SHA-256 without the list of builds `just release` appended to it, which is
 # the hash `just dist` gives for the same commit

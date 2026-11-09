@@ -48,7 +48,7 @@ cargo install --locked cargo-zigbuild --version 0.24.1
 | --- | --- | --- |
 | [CI](.github/workflows/ci.yml) | each pull request and push to main | `just lint`, the tests on Linux, macOS and Windows (built with zig as releases are, run on Windows), `chat-json` for chat-apk's Android ABIs, the oldest Rust the crates name, the API docs |
 | [E2E](.github/workflows/e2e.yml) | each pull request and push, and nightly | the interop suites between real processes: two `chat-json`, and `chat-json` with `chat --json`; nightly, four minutes of rekeys and two rooms over the live Tor network |
-| [Build](.github/workflows/build.yml) | pushes to main, tags, weekly, and pull requests that change the build | `just dist` twice, on two systems in two folders, which must give the same bytes; the binaries, unsigned, as artifacts; the Mac builds started on a Mac |
+| [Build](.github/workflows/build.yml) | pushes to main, tags, weekly, and pull requests that change the build | `just dist`'s binaries twice, each in a job of its own, on two systems in two folders, which must give the same bytes; the binaries, unsigned, as artifacts; the Mac builds started on a Mac |
 | [Prepare release](.github/workflows/prepare-release.yml) | started by hand, from the Actions tab | `just prepare`, opened as a "Release VERSION" pull request; merging it publishes nothing until `just release` |
 | [Release](.github/workflows/release.yml) | each published release | `just verify` and `just reproduce`: it signs nothing, since the release key stays offline |
 | [Audit](.github/workflows/audit.yml) | when the dependencies change, and daily | RustSec's advisories against `Cargo.lock` |
@@ -59,12 +59,12 @@ Arti, which is pinned exactly and moves on in a commit of its own.
 
 Every crate in the workspace is in CI as it joins (each job takes `--workspace`), and the release
 workflows go by the justfile: what `just dist` builds is what's built, checked and reproduced.
-chat-gui, once it's started, adds its binaries to the justfile's `binaries` and their builds to
-`just dist`, and any system libraries its toolkit links to the CI jobs. Each binary carries the
-signed list of builds peers check its build against, which holds 3 at most (`just dist` refuses
-more): `BUILDS` for Linux and Windows, `BUILDS-macos` for the Macs. chat-gui's binaries get a
-list of their own. chat-apk has a CI of its own, which builds
-the APK with this repository's main branch.
+chat-gui, once it's started, adds its binaries to the justfile's `binaries`, their builds to
+`_dist-build` and the Build workflow's matrix, and any system libraries its toolkit links to the
+CI jobs. Each binary carries the signed list of builds peers check its build against, which holds
+3 at most (`just dist` refuses more): `BUILDS` for Linux and Windows, `BUILDS-macos` for the
+Macs. chat-gui's binaries get a list of their own. chat-apk has a CI of its own, which builds the
+APK with this repository's main branch.
 
 ## License
 
