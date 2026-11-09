@@ -17,26 +17,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// "HH:MM", local time.
 fn hhmm() -> String {
-    hhmm_at(
+    net::history::hhmm(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
     )
-}
-
-/// "HH:MM" of a Unix time, local time.
-fn hhmm_at(unix: u64) -> String {
-    let t = unix as i64;
-    #[cfg(unix)]
-    {
-        // SAFETY: localtime_r only writes into the struct it's given.
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        let tt = t as libc::time_t;
-        if !unsafe { libc::localtime_r(&tt, &mut tm) }.is_null() {
-            return format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
-        }
-    }
-    format!("{:02}:{:02}", (t / 3600) % 24, (t / 60) % 60)
 }
 
 tokio::task_local! {
@@ -135,7 +120,7 @@ fn file_json(f: &FileInfo, me: PeerId) -> Value {
     o.insert("mine".into(), f.mine.into());
     o.insert("from".into(), f.from.unwrap_or(me).hex().into());
     o.insert("image".into(), f.image.into());
-    o.insert("at".into(), hhmm_at(f.at).into());
+    o.insert("at".into(), net::history::hhmm(f.at).into());
     let state = match &f.state {
         FileState::Offered | FileState::Withdrawn => "offered",
         FileState::Fetching { .. } => "fetching",
@@ -653,7 +638,7 @@ impl State {
                 self.move_json = match ask {
                     Some(a) => json!({
                         "t": "move", "seq": a.seq, "from": a.from, "coming": a.coming.len(),
-                        "names": names::list(&a.coming), "at": hhmm_at(a.at),
+                        "names": names::list(&a.coming), "at": net::history::hhmm(a.at),
                     }),
                     None => json!({"t": "move", "seq": 0}),
                 };
