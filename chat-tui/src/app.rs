@@ -382,6 +382,17 @@ pub enum Modal {
     Update,
 }
 
+impl Modal {
+    /// Settings, a folder browser, the files, a picture and the help fill the screen; every other
+    /// modal is a box over the chat, or over the page it was opened from.
+    pub fn is_page(&self) -> bool {
+        matches!(
+            self,
+            Modal::Settings(_) | Modal::Browser(_) | Modal::Files(_) | Modal::Picture(_) | Modal::Help(_)
+        )
+    }
+}
+
 /// What a box that asks is about.
 pub enum Ask {
     /// /install (or /save): y goes on to the new save's passphrase, or saves the open one.
@@ -817,17 +828,42 @@ impl App {
                 room.set_identity(self.base.identity.clone());
             }
         }
-        match &ident {
-            Some(i) => {
-                let lines = i.describe();
+        let lines = ident.as_ref().map(Ident::describe);
+        self.ident = ident;
+        match lines {
+            // Chosen from the signing identity's page: back to the settings, which show it.
+            Some(_) if let Some(mut p) = self.take_settings() => {
+                p.pick = None;
+                self.show_page(p);
+            }
+            Some(lines) => {
                 self.modal = Some(Modal::Info {
-                    title: " Signing identity ".into(),
+                    title: "SIGNING IDENTITY".into(),
                     lines,
                 });
             }
             None => self.say("not signing now: peers see you as unverified"),
         }
-        self.ident = ident;
+    }
+
+    /// The settings page, from the screen, or from under the box or the folder browser over it.
+    fn take_settings(&mut self) -> Option<crate::settings_page::Page> {
+        if let Some(Modal::Settings(_)) = &self.modal
+            && let Some(Modal::Settings(p)) = self.modal.take()
+        {
+            return Some(p);
+        }
+        match self.behind.take().map(|m| *m) {
+            Some(Modal::Settings(p)) => Some(p),
+            Some(Modal::Browser(b)) if matches!(b.back, crate::browser::Back::Page(_)) => match b.back {
+                crate::browser::Back::Page(p) => Some(p),
+                _ => None,
+            },
+            other => {
+                self.behind = other.map(Box::new);
+                None
+            }
+        }
     }
 
     fn prompt_key_password(&mut self, kind: IdentityKind, with_nick: bool) {
@@ -845,7 +881,7 @@ impl App {
         };
         self.modal = Some(Modal::Prompt {
             kind: PromptKind::KeyPassword { kind, with_nick },
-            title: " Make your signing key ".into(),
+            title: format!("NATIVE {} KEY", if kind == IdentityKind::Pgp { "PGP" } else { "AGE" }),
             hint,
             input: Input::default(),
         });
@@ -1259,18 +1295,15 @@ impl App {
     }
 
     pub fn on_msg(&mut self, msg: Msg) {
-        // A save's news can open a box; over a page, the page comes back once it closes.
-        let page = match (&msg, &self.modal) {
-            (Msg::Save(_), Some(Modal::Settings(_) | Modal::Browser(_))) => self.modal.take(),
-            _ => None,
-        };
+        // A message can open a box (a save's news, a key made from its password); over a page, the
+        // page is under it while it's handled, and comes back once the box closes.
+        let page = matches!(msg, Msg::Save(_) | Msg::Identity(_)) && self.modal.as_ref().is_some_and(Modal::is_page);
+        if page {
+            self.behind = self.modal.take().map(Box::new);
+        }
         self.handle_msg(msg);
-        if let Some(p) = page {
-            if self.modal.is_none() {
-                self.modal = Some(p);
-            } else {
-                self.behind = Some(Box::new(p));
-            }
+        if page {
+            self.back_to_page();
         }
     }
 
@@ -1507,6 +1540,13 @@ impl App {
             TermEvent::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k).await,
             // A paste's letters would answer the QUIT box.
             TermEvent::Paste(_) | TermEvent::Mouse(_) if self.asking_quit => {}
+            // Locked, only the passphrase box takes anything: what's under it is out of reach.
+            TermEvent::Paste(text) if self.locked.is_some() => {
+                if let Some(l) = self.locked.as_mut().filter(|l| !l.busy) {
+                    text.replace(['\r', '\n'], "").chars().for_each(|c| l.input.insert(c));
+                }
+            }
+            TermEvent::Mouse(_) if self.locked.is_some() => {}
             // The wheel scrolls what it's over: the console, or the chat.
             TermEvent::Mouse(m) if self.modal.is_none() => {
                 let by: isize = match m.kind {
@@ -1727,9 +1767,6 @@ impl App {
 
     fn join_id_typed(&mut self, text: &str) {
         let id = text.trim();
-        if id.is_empty() {
-            return self.fail("type the room's id - or Esc to cancel");
-        }
         if chat_core::protocol::names::is_invite(id) {
             return self.join(id);
         }
@@ -1785,6 +1822,12 @@ impl App {
                 },
                 KeyCode::Enter => {
                     let text = input.text();
+                    // A field that's refused stays open with what was typed, to fix or Esc.
+                    if let Some(why) = self.refused(&kind, &text) {
+                        self.fail(why);
+                        self.modal = Some(Modal::Prompt { kind, title, hint, input });
+                        return;
+                    }
                     match kind {
                         PromptKind::Nick => self.set_nick(text.trim()).await,
                         PromptKind::NewRoom => self.create_room(Some(text.trim().to_string())),

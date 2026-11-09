@@ -346,7 +346,8 @@ async fn async_main(args: Args) -> std::io::Result<()> {
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     let result = run(&mut terminal, args).await;
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
-    write_sequences(&[&ansi(crossterm::event::DisableMouseCapture), input::THEME_UNWATCH]);
+    // The terminal's own cursor shape back.
+    write_sequences(&[&ansi(crossterm::event::DisableMouseCapture), input::THEME_UNWATCH, b"\x1b[0 q"]);
     ratatui::restore();
     notify::shutdown();
     result
@@ -411,8 +412,15 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, args: Args) -> std::io::Re
     #[cfg(unix)]
     let mut resized = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
+    let mut block_cursor = None;
     loop {
         let done = terminal.draw(|f| ui::draw(f, &app))?;
+        // A steady block while the line is in NORMAL, a steady bar in every field.
+        let block = app.mode == cmdline::Mode::Normal && app.modal.is_none() && app.locked.is_none();
+        if block_cursor != Some(block) {
+            block_cursor = Some(block);
+            write_sequences(&[if block { b"\x1b[2 q" } else { b"\x1b[6 q" }]);
+        }
         // The chat's links, while nothing covers it: drawn again inside OSC 8, so a terminal that
         // takes it opens the link on a click.
         let linked: Vec<(String, Vec<Placed>)> = if app.modal.is_none() && app.locked.is_none() {

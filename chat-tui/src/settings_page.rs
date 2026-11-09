@@ -740,13 +740,7 @@ impl App {
             return;
         }
         match crate::identity::Ident::from_text(&text, kind) {
-            Some(i) => {
-                self.use_identity(Some(i));
-                if let Some(Modal::Settings(mut p)) = self.behind.take().map(|m| *m) {
-                    p.pick = None;
-                    self.show_page(p);
-                }
-            }
+            Some(i) => self.use_identity(Some(i)),
             None => {
                 self.fail(match kind {
                     IdentityKind::Pgp => "that isn't an unencrypted EdDSA/Ed25519 secret key - paste another, or Esc",

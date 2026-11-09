@@ -437,18 +437,6 @@ impl App {
         if path.is_empty() {
             self.fail("type the key file's path - or Esc to go back");
         } else if self.load_key(kind, &chat_core::net::files::typed_path_here(path)) {
-            let page = match self.behind.take().map(|m| *m) {
-                Some(Modal::Settings(p)) => Some(p),
-                Some(Modal::Browser(b)) => match b.back {
-                    Back::Page(p) => Some(p),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(mut p) = page {
-                p.pick = None;
-                self.show_page(p);
-            }
             return;
         }
         self.modal = Some(Modal::Prompt {
