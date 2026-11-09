@@ -484,9 +484,264 @@ pub fn link_target(link: &str) -> String {
     out
 }
 
+/// What a part of a line of chat's own text (a note, or the network's log) is, for an interface to
+/// highlight it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// The part of chat a line comes from, which it starts with: "tor:", "nostr:", "joining:".
+    Source,
+    /// The "warning:" a line starts with.
+    Warning,
+    /// A command to type: "/invite".
+    Command,
+    /// Where a peer or a server is: "192.0.2.7:5000", "\[2001:db8::1\]:5000", "abc...xyz.onion",
+    /// "relay.example.net".
+    Address,
+    /// A file or folder: "~/Downloads/a.png".
+    Path,
+    /// A count, a size, a share, an id or a group of hex: "3", "2/5", "45%", "f838687f".
+    Number,
+    /// An invite to a room, password and all.
+    Invite,
+    /// A verify code's words, to read out.
+    Code,
+    /// What went right: "connected", "joined", "verified".
+    Good,
+    /// What's under way: "connecting", "waiting", "retrying".
+    Busy,
+    /// What went wrong: "failed", "can't", "refused".
+    Bad,
+    /// One of the names asked about (the room's, yours, a peer's), by its place among them.
+    Name(usize),
+}
+
+const GOOD: &[&str] = &[
+    "answered",
+    "back",
+    "compared",
+    "connected",
+    "delivered",
+    "done",
+    "found",
+    "hosting",
+    "joined",
+    "kept",
+    "mapped",
+    "match",
+    "open",
+    "opened",
+    "published",
+    "reached",
+    "ready",
+    "saved",
+    "sent",
+    "up",
+    "verified",
+];
+const BUSY: &[&str] = &[
+    "asking",
+    "checking",
+    "connecting",
+    "deriving",
+    "downloading",
+    "fetching",
+    "finding",
+    "joining",
+    "looking",
+    "making",
+    "opening",
+    "publishing",
+    "queued",
+    "reconnecting",
+    "retrying",
+    "sealing",
+    "sending",
+    "starting",
+    "trying",
+    "waiting",
+];
+const BAD: &[&str] = &[
+    "can't",
+    "cannot",
+    "couldn't",
+    "denied",
+    "differ",
+    "error",
+    "failed",
+    "invalid",
+    "lost",
+    "missed",
+    "quiet",
+    "refused",
+    "timed",
+    "unexpected",
+    "unreachable",
+    "wrong",
+];
+
+/// The parts of a line of chat's own text to highlight, as (start, length, what) in bytes, in
+/// order, with `names` (the room's, yours, peers') marked where a word is one of them. Each is a
+/// whole word, without the brackets or punctuation around it. Peers' messages aren't read this
+/// way: they're theirs, and anything in them could look like anything.
+// shortcut: words split at spaces, so a path with a space is marked up to it, "/tmp" alone reads as
+// a command and "a.png" as a host; mark from the line's own parts if notes ever carry them.
+pub fn console_marks(text: &str, names: &[&str]) -> Vec<(usize, usize, Mark)> {
+    let mut out = Vec::new();
+    // The source it starts with: one lowercase word and a colon.
+    let mut from = 0;
+    if let Some((tag, _)) = text.split_once(": ")
+        && !tag.is_empty()
+        && tag.bytes().all(|c| c.is_ascii_lowercase())
+    {
+        out.push((0, tag.len() + 1, if tag == "warning" { Mark::Warning } else { Mark::Source }));
+        from = tag.len() + 1;
+    }
+    // A verify code: its words, from the colon before them to its hex.
+    let code = text
+        .find(" (in hex ")
+        .and_then(|end| text[..end].rfind(": ").map(|start| start + 2..end));
+    let mut at = 0;
+    for word in text.split(' ') {
+        let start = at;
+        at += word.len() + 1;
+        let lead = word.len() - word.trim_start_matches(['(', '"', '\'']).len();
+        let w = word[lead..].trim_end_matches([')', '"', '\'', ',', '.', ';', ':', '!', '?']);
+        if start < from || w.is_empty() {
+            continue;
+        }
+        let m = match &code {
+            Some(c) if c.contains(&start) && w != "\u{b7}" => Some(Mark::Code),
+            _ => word_mark(w, names),
+        };
+        if let Some(m) = m {
+            out.push((start + lead, w.len(), m));
+        }
+    }
+    out
+}
+
+fn word_mark(w: &str, names: &[&str]) -> Option<Mark> {
+    let b = w.as_bytes();
+    let first = *b.first()?;
+    let lower = w.to_ascii_lowercase();
+    let host = w
+        .rsplit_once(':')
+        .filter(|(_, port)| port.parse::<u16>().is_ok())
+        .map_or(w, |(h, _)| h);
+    if let Some(i) = names
+        .iter()
+        .position(|n| !n.is_empty() && (*n == w || w.strip_suffix("'s") == Some(n)))
+    {
+        Some(Mark::Name(i))
+    } else if first == b'/' && b.len() > 1 && b[1..].iter().all(u8::is_ascii_lowercase) {
+        Some(Mark::Command)
+    } else if w.len() > "chat:".len() && crate::protocol::names::is_invite(w) {
+        Some(Mark::Invite)
+    } else if w.parse::<std::net::SocketAddr>().is_ok()
+        || w.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().is_ok()
+        || host.len() > ".onion".len() && host.ends_with(".onion")
+        || !host.is_empty() && domain_len(host.as_bytes()) == host.len()
+    {
+        Some(Mark::Address)
+    } else if w.starts_with("~/") || w.starts_with("./") || first == b'/' && w[1..].contains('/') {
+        Some(Mark::Path)
+    } else if first.is_ascii_digit() && b.iter().all(|c| c.is_ascii_digit() || b".,/%".contains(c))
+        || b.len() >= 4 && b.iter().all(u8::is_ascii_hexdigit) && b.iter().any(u8::is_ascii_digit)
+    {
+        Some(Mark::Number)
+    } else if GOOD.contains(&lower.as_str()) {
+        Some(Mark::Good)
+    } else if BUSY.contains(&lower.as_str()) {
+        Some(Mark::Busy)
+    } else if BAD.contains(&lower.as_str()) {
+        Some(Mark::Bad)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marks_console_lines() {
+        let marks = |t: &'static str| -> Vec<(&str, Mark)> {
+            console_marks(t, &["vin-moe-party", "ida", "Gemma"])
+                .into_iter()
+                .map(|(a, n, m)| (&t[a..a + n], m))
+                .collect()
+        };
+        assert_eq!(
+            marks("nostr: connected to relay.snort.social"),
+            [
+                ("nostr:", Mark::Source),
+                ("connected", Mark::Good),
+                ("relay.snort.social", Mark::Address)
+            ]
+        );
+        assert_eq!(
+            marks("joining: peer f838687f - connected, waiting for its nick"),
+            [
+                ("joining:", Mark::Source),
+                ("f838687f", Mark::Number),
+                ("connected", Mark::Good),
+                ("waiting", Mark::Busy)
+            ]
+        );
+        assert_eq!(
+            marks("Gemma (verified) joined (2 online)"),
+            [
+                ("Gemma", Mark::Name(2)),
+                ("verified", Mark::Good),
+                ("joined", Mark::Good),
+                ("2", Mark::Number)
+            ]
+        );
+        // A verify code's words, and its hex all alike.
+        assert_eq!(
+            marks("verify code with Gemma: city holy \u{b7} curl easy (in hex 1a5e 4684) - compare it"),
+            [
+                ("Gemma", Mark::Name(2)),
+                ("city", Mark::Code),
+                ("holy", Mark::Code),
+                ("curl", Mark::Code),
+                ("easy", Mark::Code),
+                ("1a5e", Mark::Number),
+                ("4684", Mark::Number),
+            ]
+        );
+        assert_eq!(
+            marks("hi to ida's peer (192.0.2.7:5000, try 2/5) failed"),
+            [
+                ("ida's", Mark::Name(1)),
+                ("192.0.2.7:5000", Mark::Address),
+                ("2/5", Mark::Number),
+                ("failed", Mark::Bad)
+            ]
+        );
+        assert_eq!(marks("warning: bob no longer signs"), [("warning:", Mark::Warning)]);
+        assert_eq!(
+            marks("room vin-moe-party is ready. /invite copies it (/verify NAME)."),
+            [
+                ("vin-moe-party", Mark::Name(0)),
+                ("ready", Mark::Good),
+                ("/invite", Mark::Command),
+                ("/verify", Mark::Command)
+            ]
+        );
+        assert_eq!(
+            marks("saved file 3 to ~/Downloads/a.png."),
+            [("saved", Mark::Good), ("3", Mark::Number), ("~/Downloads/a.png", Mark::Path)]
+        );
+        assert_eq!(
+            marks("from [2001:db8::1]:5000 and abcdefgh.onion:80"),
+            [("[2001:db8::1]:5000", Mark::Address), ("abcdefgh.onion:80", Mark::Address)]
+        );
+        assert_eq!(marks("share this invite: chat:room:pw:x"), [("chat:room:pw:x", Mark::Invite)]);
+        // Words that only have digits or hex letters in them, and plain words: nothing.
+        assert!(marks("hi2 cafe 8a1 udp/1234 tor said chat").is_empty());
+    }
 
     #[test]
     fn cleans_text() {
