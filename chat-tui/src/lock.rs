@@ -41,13 +41,13 @@ impl App {
             let hint = "No save is open, so the lock needs a PIN: chat keeps it hashed in memory until it exits.".into();
             self.modal = Some(Modal::Prompt {
                 kind: PromptKind::SetPin,
-                title: " Lock screen ".into(),
+                title: "LOCK SCREEN \u{b7} PIN".into(),
                 hint,
                 input: Input::default(),
             });
             return;
         }
-        self.modal = None;
+        // What's open stays as it was under the lock.
         self.locked = Some(Lock::default());
     }
 
