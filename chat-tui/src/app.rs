@@ -830,19 +830,21 @@ impl App {
         }
         let lines = ident.as_ref().map(Ident::describe);
         self.ident = ident;
-        match lines {
+        let Some(lines) = lines else {
+            return self.say("not signing now: peers see you as unverified");
+        };
+        match self.take_settings() {
             // Chosen from the signing identity's page: back to the settings, which show it.
-            Some(_) if let Some(mut p) = self.take_settings() => {
+            Some(mut p) => {
                 p.pick = None;
                 self.show_page(p);
             }
-            Some(lines) => {
+            None => {
                 self.modal = Some(Modal::Info {
                     title: "SIGNING IDENTITY".into(),
                     lines,
                 });
             }
-            None => self.say("not signing now: peers see you as unverified"),
         }
     }
 
