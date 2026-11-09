@@ -2017,6 +2017,25 @@ impl App {
         }
     }
 
+    /// /leave: the room on screen goes, open, opening, failed or closed. Its history is written
+    /// first, as its view goes with it.
+    async fn leave_room(&mut self) -> Result<(), String> {
+        let r = self.room().ok_or("no room is open here")?;
+        let (id, room) = (r.id, r.room().cloned());
+        let written = self.write_history(id, true);
+        // An opening room leaves once it opens, its handle dropped with nowhere to go.
+        if let Some(room) = room {
+            room.leave().await;
+        }
+        self.rooms.remove(self.current);
+        self.current = self.current.min(self.rooms.len().saturating_sub(1));
+        if !written {
+            return Err("left the room, but its history couldn't be written to the save".into());
+        }
+        self.say("left the room");
+        Ok(())
+    }
+
     /// The answer to a command that sent one of our messages: remembered for its ticks.
     fn sent(&mut self, id: usize, result: Result<Outcome, CommandError>) {
         match result {
@@ -2144,10 +2163,7 @@ impl App {
             "uninstall" => self.uninstall_command(arg),
             "keep" => self.keep_command(arg),
             "set" => self.set_command(arg).await,
-            "quit" | "q" | "exit" | "close" | "bd" | "bw" => {
-                self.quit = true;
-                Ok(())
-            }
+            "leave" | "part" => self.leave_room().await,
             "nick" | "name" => {
                 if arg.is_empty() {
                     Err(format!("you're {} - /nick NAME changes it", self.nick))
@@ -2568,15 +2584,6 @@ impl App {
                     .parse()
                     .map_err(|_| "usage: /cancel N - stops fetching file N, or stops offering one of yours")?;
                 room.cancel(num).await.map_err(|e| e.to_string())?;
-            }
-            "leave" | "part" => {
-                room.leave().await;
-                let r = self.room_mut().expect("open");
-                r.state = RoomState::Closed;
-                let i = self.current;
-                self.rooms.remove(i);
-                self.current = self.current.min(self.rooms.len().saturating_sub(1));
-                self.say("left the room");
             }
             other => return Err(format!("no command /{other} - /help lists them")),
         }

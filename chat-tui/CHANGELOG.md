@@ -9,6 +9,12 @@
 - The console's lines are highlighted: where each comes from, what went right, what's under way
   and what went wrong, commands, addresses, paths and numbers, and the room and people's names.
   Peers' messages aren't.
+- /quit (and q, exit, close, bd, bw) is gone: /leave leaves the room on screen, /quitall quits.
+- /leave closes a room that's still opening, failed to open or has closed, too.
+
+### Fixed
+
+- /leave writes the room's kept history before it goes, and says so if the save refused it.
 
 ## 0.6.1
 

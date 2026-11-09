@@ -725,13 +725,14 @@ impl App {
         r.history = Some(h);
     }
 
-    /// A room's history written to the save, if it changed; `stop` stops keeping it.
-    pub(crate) fn write_history(&mut self, id: usize, stop: bool) {
+    /// A room's history written to the save, if it changed; `stop` stops keeping it. False if the
+    /// save refused it.
+    pub(crate) fn write_history(&mut self, id: usize, stop: bool) -> bool {
         let Some(r) = self.rooms.iter_mut().find(|r| r.id == id) else {
-            return;
+            return true;
         };
         let (Some(info), Some(h)) = (&r.info, r.history.as_mut()) else {
-            return;
+            return true;
         };
         let mut failed = false;
         if h.dirty {
@@ -750,6 +751,7 @@ impl App {
         if stop {
             r.history = None;
         }
+        !failed
     }
 
     /// `/history [forget [all]]`.
