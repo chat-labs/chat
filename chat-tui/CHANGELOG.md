@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- With more than one save, the one to open is picked from a list, as chat starts and from
+  /install, in place of typing its name.
+
 ## 0.6.1
 
 ### Changed

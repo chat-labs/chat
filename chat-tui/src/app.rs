@@ -278,8 +278,6 @@ pub enum PromptKind {
     JoinId,
     /// The password for this room id.
     JoinPassword(String),
-    /// Which save to open, from several.
-    PickSave,
     /// A save's passphrase, as chat starts.
     Unlock(String),
     /// A save's authenticator code.
@@ -366,6 +364,11 @@ pub enum Modal {
     Rooms {
         sel: usize,
         forgetting: bool,
+    },
+    /// The saves to open one of, by name, and the one picked.
+    PickSave {
+        names: Vec<String>,
+        sel: usize,
     },
     /// A link from the chat, before it's opened: (the link, who sent it, when), newest first.
     Link {
@@ -1797,18 +1800,7 @@ impl App {
             } => match k.code {
                 KeyCode::Esc => match kind {
                     PromptKind::Nick => self.say(format!("you're {}", self.nick)),
-                    // As chat starts, it goes on with its defaults; later, from /install, nothing opens.
-                    PromptKind::PickSave | PromptKind::Unlock(_) | PromptKind::Code if self.start.is_none() => {
-                        self.pending_code = None;
-                        self.pending_factor = None;
-                        self.overwriting = false;
-                        self.say("nothing was opened");
-                    }
-                    PromptKind::PickSave | PromptKind::Unlock(_) | PromptKind::Code => {
-                        self.pending_code = None;
-                        self.say("started without the save: chat's defaults, and nothing you change is saved");
-                        self.begin_start(false);
-                    }
+                    PromptKind::Unlock(_) | PromptKind::Code => self.unlock_skipped(),
                     PromptKind::Install(_) => {
                         self.pending_factor = None;
                         self.say("not installed - nothing was written");
@@ -1836,7 +1828,6 @@ impl App {
                         PromptKind::JoinId => self.join_id_typed(&text),
                         PromptKind::JoinPassword(id) => self.join(&format!("{id} {}", text.trim())),
                         PromptKind::KeyPassword { kind, with_nick } => self.make_key(kind, &text, with_nick),
-                        PromptKind::PickSave => self.pick_save(&text),
                         PromptKind::Unlock(name) => self.unlock(name, zeroize::Zeroizing::new(text)),
                         PromptKind::Code => self.check_code(text),
                         PromptKind::Install(crate::saved::Installing::Name) => self.install_name(&text),
@@ -1931,6 +1922,7 @@ impl App {
             Modal::Files(num) => self.files_key(num, k).await,
             Modal::Picture(num) => self.picture_key(num, k).await,
             Modal::Rooms { sel, forgetting } => self.rooms_key(sel, forgetting, k),
+            Modal::PickSave { names, sel } => self.pick_save_key(names, sel, k),
             Modal::Link { links, at } => match k.code {
                 KeyCode::Char('j') | KeyCode::Down if at + 1 < links.len() => self.modal = Some(Modal::Link { links, at: at + 1 }),
                 KeyCode::Char('k') | KeyCode::Up if at > 0 => self.modal = Some(Modal::Link { links, at: at - 1 }),

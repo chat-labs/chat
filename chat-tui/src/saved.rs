@@ -63,9 +63,8 @@ impl App {
             None if list.len() == 1 => list[0].name.clone(),
             None if list.is_empty() => return self.begin_start(false),
             None => {
-                let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
-                let hint = format!("Your saves: {}. Type one's name; Esc starts without any.", names.join(", "));
-                return self.prompt(PromptKind::PickSave, "UNLOCK", hint);
+                let names = list.into_iter().map(|s| s.name).collect();
+                return self.modal = Some(Modal::PickSave { names, sel: 0 });
             }
         };
         if let Ok(pass) = std::env::var("CHAT_INSTALL_PASSWORD") {
@@ -90,8 +89,32 @@ impl App {
         self.prompt(PromptKind::Unlock(name), "UNLOCK", hint);
     }
 
-    pub fn pick_save(&mut self, name: &str) {
-        self.ask_passphrase(name.trim().to_string());
+    /// Enter asks for the passphrase of the save picked; Esc opens none.
+    pub fn pick_save_key(&mut self, names: Vec<String>, sel: usize, k: crossterm::event::KeyEvent) {
+        use crate::settings_page::{ListKey, list_key};
+        let sel = match list_key(&k) {
+            ListKey::Choose | ListKey::Right => return self.ask_passphrase(names[sel].clone()),
+            ListKey::Left | ListKey::Back | ListKey::Close => return self.unlock_skipped(),
+            ListKey::Up => sel.saturating_sub(1),
+            ListKey::Down => (sel + 1).min(names.len() - 1),
+            ListKey::First => 0,
+            ListKey::Last => names.len() - 1,
+            _ => sel,
+        };
+        self.modal = Some(Modal::PickSave { names, sel });
+    }
+
+    /// Esc while a save is being opened: as chat starts, it goes on with its defaults; later, from
+    /// /install, nothing opens.
+    pub fn unlock_skipped(&mut self) {
+        self.pending_code = None;
+        if self.start.is_none() {
+            self.pending_factor = None;
+            self.overwriting = false;
+            return self.say("nothing was opened");
+        }
+        self.say("started without the save: chat's defaults, and nothing you change is saved");
+        self.begin_start(false);
     }
 
     /// Argon2id takes seconds and 512 MiB, off the UI's thread.
@@ -1414,8 +1437,9 @@ impl App {
                     .saves
                     .as_ref()
                     .map_or(Vec::new(), |s| s.list().into_iter().map(|i| i.name).collect());
-                let hint = format!("Your saves: {}. Type one's name; Esc cancels.", names.join(", "));
-                self.prompt(PromptKind::PickSave, "UNLOCK", hint);
+                if !names.is_empty() {
+                    self.modal = Some(Modal::PickSave { names, sel: 0 });
+                }
             }
             (Ask::UseSave(_), Some(false)) => self.install_new(),
             (Ask::UseSave(_), None) => self.install_cancelled("not installed - nothing was written"),
