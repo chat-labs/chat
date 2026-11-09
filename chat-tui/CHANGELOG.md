@@ -6,6 +6,9 @@
 
 - With more than one save, the one to open is picked from a list, as chat starts and from
   /install, in place of typing its name.
+- The console's lines are highlighted: where each comes from, what went right, what's under way
+  and what went wrong, commands, addresses, paths and numbers, and the room and people's names.
+  Peers' messages aren't.
 
 ## 0.6.1
 

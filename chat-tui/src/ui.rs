@@ -741,17 +741,62 @@ fn entry_lines(app: &App, r: &RoomView, e: &crate::app::Entry, w: usize) -> Vec<
             }
             lines
         }
-        EntryKind::Note(Level::Warn, text) => wrap(
-            &[
-                time,
-                (format!("! {text}"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ],
+        EntryKind::Note(Level::Warn, text) => console_line(
+            app,
+            r,
+            time,
+            "! ",
+            text,
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             w,
-            8,
         ),
-        EntryKind::Note(Level::Note, text) => wrap(&[time, (format!("· {text}"), faint())], w, 8),
-        EntryKind::Log(text) => wrap(&[time, (format!("net: {text}"), faint().add_modifier(Modifier::ITALIC))], w, 8),
+        EntryKind::Note(Level::Note, text) => console_line(app, r, time, "\u{b7} ", text, faint(), w),
+        EntryKind::Log(text) => console_line(app, r, time, "net: ", text, faint().add_modifier(Modifier::ITALIC), w),
     }
+}
+
+/// A line of chat's own text, highlighted: its prose in `base`, and what chat-core marks in it
+/// brought out of the faint. Where it comes from is in the accent, and so are commands, as keys
+/// are; what went right is green, what's under way yellow and what went wrong red; addresses are
+/// blue, numbers and ids cyan, and a verify code, paths and invites in the terminal's own colour.
+/// The room, you and peers are named in bold, people in their colours. A line that starts with
+/// "warning:" is yellow.
+fn console_line(app: &App, r: &RoomView, time: (String, Style), lead: &str, text: &str, base: Style, w: usize) -> Vec<Line<'static>> {
+    use chat_core::protocol::text::{Mark, console_marks};
+    let names: Vec<&str> = [r.label.as_str(), app.nick.as_str()]
+        .into_iter()
+        .chain(r.peers.iter().map(|p| p.name.as_str()))
+        .collect();
+    let marks = console_marks(text, &names);
+    let base = match marks.first() {
+        Some((_, _, Mark::Warning)) => Style::default().fg(Color::Yellow),
+        _ => base,
+    };
+    let fg = |c: Color| Style::default().fg(c);
+    let mut pieces = vec![time, (lead.to_string(), base)];
+    let mut at = 0;
+    for (a, n, m) in marks {
+        let st = match m {
+            Mark::Source => accent(),
+            Mark::Command => accent_bold(),
+            Mark::Warning => fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Mark::Good => fg(Color::Green),
+            Mark::Busy => fg(Color::Yellow),
+            Mark::Bad => fg(Color::Red).add_modifier(Modifier::BOLD),
+            Mark::Address => fg(Color::Blue),
+            Mark::Number => fg(Color::Cyan),
+            Mark::Code | Mark::Invite => bold(),
+            Mark::Path => Style::default(),
+            Mark::Name(0) => bold(),
+            Mark::Name(1) => fg(app.colour.map_or(Color::Reset, rgb)).add_modifier(Modifier::BOLD),
+            Mark::Name(i) => fg(r.peers.get(i - 2).map_or(Color::Reset, |p| rgb(p.colour))).add_modifier(Modifier::BOLD),
+        };
+        pieces.push((text[at..a].to_string(), base));
+        pieces.push((text[a..a + n].to_string(), base.patch(st.remove_modifier(Modifier::DIM))));
+        at = a + n;
+    }
+    pieces.push((text[at..].to_string(), base));
+    wrap(&pieces, w, 8)
 }
 
 /// The most rows a picture takes in the messages.
