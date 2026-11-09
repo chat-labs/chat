@@ -6,4 +6,10 @@ ignore = [
     # crypto-bigint 0.5: it's in Cargo.lock only, through elliptic-curve, and nothing in the
     # workspace builds it (`cargo tree -i elliptic-curve --target all -e all` prints nothing).
     "RUSTSEC-2026-0387",
+    # libsqlite3-sys before 0.39 (SQLite before 3.54): a crafted database and -wal file can make
+    # reads return stale memory. The fix needs rusqlite 0.41, which arti's tor-dirmgr (0.47 and
+    # 0.48) doesn't allow yet: drop this when an arti that does is pinned. The only database is
+    # arti's cache, in a 0700 folder with a random name that chat makes, and it's restored only
+    # from the save, sealed with its passphrase, so crafting one takes this account or that key.
+    "RUSTSEC-2026-0459",
 ]
