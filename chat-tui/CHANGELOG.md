@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.1
+
+### Changed
+
+- One look across the screens: secondary text in the terminal's own faint style, in place of the
+  dark grey and cyan some used; every box drawn with the same edges, title and corners; and every
+  question, field and list in one kind of box, its keys on the bottom edge and a note under it.
+- One bottom bar on every screen: where you are, your identity and nick, the last message, and the
+  keys of what's open.
+- The welcome and an empty room's text sit in the chat's own box, and with the sidebar hidden the
+  chat's title shows the room's state and unread messages elsewhere.
+- The cursor is a block in NORMAL and a bar in every field.
+
+### Fixed
+
+- A signing key made from a password in the settings goes back to the settings, not into the chat.
+- A save's news or a new key that comes up over a page keeps the page under its box.
+- Locking keeps what was open; while locked, a paste goes to the passphrase and the mouse does
+  nothing.
+- A refused room id, save name or empty passphrase keeps its box open, with what was typed.
+- chat builds with Rust 1.92 again, the oldest it names.
+
 ## 0.6.0
 
 - chat in the terminal, built on chat-core: rooms with no server and no accounts, end-to-end
