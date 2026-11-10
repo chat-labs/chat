@@ -1,7 +1,7 @@
 [package]
 name = "chat-tui"
 description = "chat in the terminal, built on chat-core"
-version.workspace = true
+version = "0.6.1"
 edition = "2024"
 authors = ["finlay@tuta.com"]
 license = "GPL-3.0-only"

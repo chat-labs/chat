@@ -1,8 +1,7 @@
-# Starts a release, or a beta: `just prepare` moves the changelog's open sections under the new
-# version and puts it in Cargo.toml, and this opens them as a "Release VERSION" pull request.
-# Merging it publishes nothing. `just release`, on the maintainer's machine, then tags the merged
-# commit, builds, signs and publishes it, so the release key never comes near GitHub and a
-# compromised account or workflow can't sign an update chat will install.
+# Starts a release, or a beta, of chat (tui) or chat-core (core): `just prepare` moves the crate's
+# changelog's open sections under the new version and puts it in its Cargo.toml, and this opens
+# them as a "Release TAG" pull request. Merging it starts the Publish workflow, which publishes it
+# once an admin approves.
 #
 # A pull request this workflow's token opens starts no workflows, so CI checks the release commit
 # once it's merged, on main.
@@ -11,6 +10,11 @@ name: Prepare release
 on:
   workflow_dispatch:
     inputs:
+      crate:
+        description: "tui (chat) or core (chat-core)"
+        type: choice
+        options: [tui, core]
+        required: true
       kind:
         description: "patch, minor, major or a version (empty: Cargo.toml's, which finishes its betas)"
         type: string
@@ -54,27 +58,31 @@ jobs:
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
+          CRATE: ${{ inputs.crate }}
           KIND: ${{ inputs.kind }}
           BETA: ${{ inputs.beta }}
         run: |
           if [ "$BETA" = true ]; then set -- beta; else set --; fi
-          v=$(just prepare "$@" ${KIND:+"$KIND"})
-          echo "$v" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?'
-          echo "version=$v" >> "$GITHUB_OUTPUT"
+          t=$(just prepare "$CRATE" "$@" ${KIND:+"$KIND"})
+          echo "$t" | grep -Eqx '(v|chat-core-v)[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?'
+          echo "tag=$t" >> "$GITHUB_OUTPUT"
       - name: Pull request
         env:
           GH_TOKEN: ${{ github.token }}
-          V: ${{ steps.prepare.outputs.version }}
+          CRATE: ${{ inputs.crate }}
+          T: ${{ steps.prepare.outputs.tag }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git switch -c "release/v$V"
-          git commit -qam "Release $V"
-          git push origin "release/v$V"
-          gh pr create --base main --head "release/v$V" --title "Release $V" --body "$(cat <<EOF
-          The changelog's open sections under $V, and $V in Cargo.toml and Cargo.lock.
+          git switch -c "release/$T"
+          git commit -qam "Release $T"
+          git push origin "release/$T"
+          gh pr create --base main --head "release/$T" --title "Release $T" --body "$(cat <<EOF
+          chat-$CRATE/CHANGELOG.md's open sections under $T's version, and that version in
+          chat-$CRATE/Cargo.toml and Cargo.lock.
 
-          Merging this publishes nothing. Then, on main with the merge pulled, \`just release\`
-          tags it v$V, builds, signs and publishes it.
+          Merging this starts the Publish workflow, which publishes $T as a GitHub release once an
+          admin approves it there (for chat, after building its binaries and checking they
+          reproduce).
           EOF
           )"

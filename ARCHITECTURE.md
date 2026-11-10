@@ -99,8 +99,9 @@ src/
    to draw.
 9. **Each crate stands on its own.** It has a README and a justfile with the same recipe names
    (`build`, `test`, `lint`, `fmt`, ...), run in its folder or from the top as a module
-   (`just core::test`); the top justfile runs them across the workspace. Every crate is
-   GPL-3.0-only, Rust edition 2024, with the same `rust-version`. No code, test or document refers
+   (`just core::test`); the top justfile runs them across the workspace. It has its own version
+   and `CHANGELOG.md`, and is released on its own. Every crate is GPL-3.0-only, Rust edition
+   2024, with the same `rust-version`. No code, test or document refers
    to any other implementation of chat.
 10. **Behaviour is tested in chat-core**: unit tests, known answers, the simulated network, and
     pairs of `chat-json` processes. An interface tests its own presentation.

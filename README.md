@@ -21,13 +21,33 @@ alone lists them.
 | `just test`, `just lint`, `just fmt` | tests, formatting and clippy, across every crate |
 | `just core::...`, `just tui::...` | a crate's own recipes, such as `just core::interop` or `just tui::demo` |
 | `just dist` | the release binaries, cross-built for Linux (static, musl), Windows and macOS 11 or later (Apple silicon and Intel), in `dist/` |
-| `just prepare [patch\|minor\|major\|beta]` | the changelog and version ready for a release, or a beta, as the Prepare release workflow does in a pull request |
-| `just release` | once that's merged: tag, build, sign and publish it on GitHub |
-| `just verify VERSION`, `just reproduce VERSION` | check a published release's signature, or build it again from its tag and compare |
+| `just prepare tui\|core [patch\|minor\|major\|beta]` | a crate's changelog and version ready for a release, or a beta, as the Prepare release workflow does in a pull request |
+| `just verify VERSION`, `just reproduce VERSION` | check a published release of chat's signature, or build it again from its tag and compare |
 
-`/update` and `chat --update` install the newest release from
-[GitHub](https://github.com/chat-labs/chat/releases), and with `/set betas on` betas too, once
-their SHA256SUMS checks out against the release key in `keys/`.
+## Releases
+
+chat-core and chat-tui are released apart, each with its own version and `CHANGELOG.md`: chat
+(chat-tui) tagged `vVERSION`, with its binaries, and chat-core tagged `chat-core-vVERSION`, with
+none. Each is a [GitHub release](https://github.com/chat-labs/chat/releases) titled by its date,
+"Release YYYYMMDD", whose notes open with both crates' versions. A chat-core release is never the
+latest one.
+
+1. Start the [Prepare release](.github/workflows/prepare-release.yml) workflow from the Actions tab,
+   or with `gh workflow run prepare-release.yml -f crate=tui -f beta=true` (`crate`, then `kind`
+   and `beta` as `just prepare` takes them). It opens a "Release TAG" pull request.
+2. Merge it. The [Publish](.github/workflows/publish.yml) workflow starts, and for chat builds the
+   binaries and checks they reproduce.
+3. An admin checks the run (its summary has the tag, the versions and the notes, and the Build
+   job's has the binaries' SHA-256s) and approves it in the `release` environment. Only then does it
+   sign and publish, and Release checks what it published.
+
+The release key is the `release` environment's `CHAT_SIGNING_KEY` (the minisign secret key file)
+and `CHAT_SIGNING_PASSWORD`. Only main deploys to that environment, and the admins are its
+required reviewers. The backup key, `keys/minisign-backup.pub`'s, stays offline. By hand, with
+the key, a release is `just dist`, then `just _publish tui` on main's merged commit.
+
+`/update` and `chat --update` install chat's newest release, and with `/set betas on` betas too,
+once their SHA256SUMS checks out against the release key in `keys/`.
 
 The release recipes cross-build with zig. Rust is the version `rust-toolchain.toml` names, which
 rustup fetches, targets included; zig and cargo-zigbuild should be the versions
@@ -48,9 +68,10 @@ cargo install --locked cargo-zigbuild --version 0.24.1
 | --- | --- | --- |
 | [CI](.github/workflows/ci.yml) | each pull request and push to main | `just lint`, the tests on Linux, macOS and Windows (built with zig as releases are, run on Windows), `chat-json` for chat-apk's Android ABIs, the oldest Rust the crates name, the API docs |
 | [E2E](.github/workflows/e2e.yml) | each pull request and push, and nightly | the interop suites between real processes: two `chat-json`, and `chat-json` with `chat --json`; nightly, four minutes of rekeys and two rooms over the live Tor network |
-| [Build](.github/workflows/build.yml) | pushes to main, tags, weekly, and pull requests that change the build | `just dist`'s binaries twice, each in a job of its own, on two systems in two folders, which must give the same bytes; the binaries, unsigned, as artifacts; the Mac builds started on a Mac |
-| [Prepare release](.github/workflows/prepare-release.yml) | started by hand, from the Actions tab | `just prepare`, opened as a "Release VERSION" pull request; merging it publishes nothing until `just release` |
-| [Release](.github/workflows/release.yml) | each published release | `just verify` and `just reproduce`: it signs nothing, since the release key stays offline |
+| [Build](.github/workflows/build.yml) | pushes to main, tags, weekly, each release of chat (from Publish), and pull requests that change the build | `just dist`'s binaries twice, each in a job of its own, on two systems in two folders, which must give the same bytes; the binaries, unsigned, as artifacts; the Mac builds started on a Mac |
+| [Prepare release](.github/workflows/prepare-release.yml) | started by hand, from the Actions tab | `just prepare`, opened as a "Release TAG" pull request |
+| [Publish](.github/workflows/publish.yml) | merges that change a crate's version | once an admin approves: Build's binaries signed with the release key and published, or a chat-core release |
+| [Release](.github/workflows/release.yml) | each release of chat, from Publish | `just verify` and `just reproduce` |
 | [Audit](.github/workflows/audit.yml) | when the dependencies change, and daily | RustSec's advisories against `Cargo.lock` |
 | [CodeQL](.github/workflows/codeql.yml) | each pull request and push to main, and weekly | code scanning of the Rust, the interop harness and the workflows, into the Security tab |
 

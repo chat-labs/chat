@@ -1,0 +1,125 @@
+# Publishes what a merged release pull request (from Prepare release) got ready, once an admin
+# approves it: a release of chat, its binaries built by the Build workflow, twice and the same both
+# times, then signed with the release key; or one of chat-core, which has none. The release
+# environment holds the key (CHAT_SIGNING_KEY, the minisign secret key file, and
+# CHAT_SIGNING_PASSWORD), only main can deploy to it, and each job that uses it waits for one of
+# its required reviewers, the admins. This run's summary has what's being published, and the
+# Build job's has the binaries' SHA-256s, to check before approving.
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - chat-core/Cargo.toml
+      - chat-tui/Cargo.toml
+
+permissions:
+  contents: read
+
+# One publish at a time. Not the Build workflow's group, which a call to it shares.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  JUST_VERSION: 1.58.0
+
+jobs:
+  plan:
+    name: What's ready to publish
+    if: github.repository == 'chat-labs/chat'
+    runs-on: ubuntu-latest
+    outputs:
+      tui: ${{ steps.pending.outputs.tui }}
+      core: ${{ steps.pending.outputs.core }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      - id: pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for c in tui core; do
+            t=$(just _pending "$c")
+            echo "$c=$t" >> "$GITHUB_OUTPUT"
+            if [ -n "$t" ]; then
+              { echo "## $t, published once an admin approves it"; echo; just _notes "$c"; echo; } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+  build:
+    name: Build
+    needs: plan
+    if: needs.plan.outputs.tui != ''
+    uses: ./.github/workflows/build.yml
+
+  tui:
+    name: Publish ${{ needs.plan.outputs.tui }}
+    needs: [plan, build]
+    if: needs.plan.outputs.tui != ''
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      # Every tag, and main's history, which _publish checks HEAD is on. Credentials to push the tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: sudo apt-get update -q && sudo apt-get install -yq minisign
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      # The first build of each binary; the Build job checked the second gave the same bytes.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: first-*
+          path: dist
+          merge-multiple: true
+      - name: Sign and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: ${{ secrets.CHAT_SIGNING_KEY }}
+          CHAT_SIGNING_PASSWORD: ${{ secrets.CHAT_SIGNING_PASSWORD }}
+        run: |
+          test -n "$KEY" || { echo "::error::the release environment has no CHAT_SIGNING_KEY"; exit 1; }
+          export CHAT_SIGNING_KEY="$RUNNER_TEMP/chat-release.key"
+          (umask 077 && printf '%s\n' "$KEY" > "$CHAT_SIGNING_KEY")
+          just _dist-lists
+          just _publish tui
+      - if: always()
+        run: rm -f "$RUNNER_TEMP/chat-release.key"
+
+  core:
+    name: Publish ${{ needs.plan.outputs.core }}
+    needs: [plan, tui]
+    # After chat's, if both are ready, so their titles don't race for the day's name.
+    if: ${{ !cancelled() && needs.plan.outputs.core != '' && needs.tui.result != 'failure' }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      - run: just _publish core
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # A release this workflow's token makes doesn't start the Release workflow by itself.
+  check:
+    name: Check ${{ needs.plan.outputs.tui }}
+    needs: [plan, tui]
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ needs.plan.outputs.tui }}

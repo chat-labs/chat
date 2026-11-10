@@ -4,6 +4,8 @@
 
 ### Changed
 
+- chat-core is released apart from chat now, on the same releases page, each release titled by
+  its date. /update with betas on takes the newest of chat's, never chat-core's.
 - With more than one save, the one to open is picked from a list, as chat starts and from
   /install, in place of typing its name.
 - The console's lines are highlighted: where each comes from, what went right, what's under way

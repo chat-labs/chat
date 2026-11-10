@@ -773,7 +773,7 @@ impl App {
                     format!(
                         "update: checking GitHub for a newer release{} (v{} here)...",
                         if betas { " or beta" } else { "" },
-                        update::VERSION
+                        update::version()
                     ),
                 );
             }
