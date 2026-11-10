@@ -69,12 +69,6 @@ pub const COMMANDS: &[Command] = &[
         "NICK",
         "open the room only you and a verified key can work out; they /call you too",
     ),
-    c(
-        "quit",
-        &["q", "exit", "close", "bd", "bw"],
-        "",
-        "leave this room; quits if none are open",
-    ),
     c("quitall", &["qa", "qall"], "", "leave every room and quit, kept ones too"),
     c("lock", &[], "", "lock the screen until the save's passphrase, or a PIN, unlocks it"),
     c("set", &[], "[NAME [VALUE]]", "change a setting; alone, opens them all (Ctrl+S)"),
