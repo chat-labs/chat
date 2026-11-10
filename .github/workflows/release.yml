@@ -1,9 +1,8 @@
-# A release is built, signed and published by `just release`, on the maintainer's machine: the
-# release key never comes near GitHub, so a compromised account or workflow can't publish an
-# update chat will install. This checks each release once it's out, as anyone could: its
-# SHA256SUMS signed with a key in keys/ as that version's, every binary matching it, and the
-# binaries built again from the tag giving the same bytes (apart from the list of builds signed
-# into each).
+# A release of chat is built, signed and published by the Publish workflow, once an admin
+# approves it. This checks each one once it's out, as anyone could: its SHA256SUMS signed with a
+# key in keys/ as that version's, every binary matching it, and the binaries built again from the
+# tag giving the same bytes (apart from the list of builds signed into each). chat-core's releases,
+# tagged chat-core-vVERSION, have no binaries to check.
 name: Release
 
 on:
@@ -13,6 +12,12 @@ on:
     inputs:
       version:
         description: The release to check, as its tag (vVERSION)
+        required: true
+  # From the Publish workflow, whose releases don't start this by themselves.
+  workflow_call:
+    inputs:
+      version:
+        type: string
         required: true
 
 permissions:
@@ -29,7 +34,7 @@ env:
 jobs:
   verify:
     name: Signed, and the binaries match
-    if: github.repository == 'chat-labs/chat'
+    if: github.repository == 'chat-labs/chat' && startsWith(github.event.release.tag_name || inputs.version, 'v')
     runs-on: ubuntu-latest
     steps:
       - name: A release tag
@@ -47,7 +52,7 @@ jobs:
 
   reproduce:
     name: Built again from the tag, the same
-    if: github.repository == 'chat-labs/chat'
+    if: github.repository == 'chat-labs/chat' && startsWith(github.event.release.tag_name || inputs.version, 'v')
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:

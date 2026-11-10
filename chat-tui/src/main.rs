@@ -210,6 +210,8 @@ pub static SANDBOX: std::sync::OnceLock<chat_core::net::sandbox::Sandbox> = std:
 static ALLOC: chat_core::net::memlock::LockedAlloc = chat_core::net::memlock::LockedAlloc;
 
 fn main() -> std::io::Result<()> {
+    // chat's version, not chat-core's: what it updates from, and the build peers are told.
+    update::set_version(env!("CARGO_PKG_VERSION"));
     chat_core::harden_process();
     let mut argv = std::env::args().skip(1);
     if argv.next().as_deref() == Some(update::HELPER_ARG)
@@ -306,7 +308,7 @@ fn run_update(args: &Args) -> i32 {
         println!(
             "chat: checking GitHub for a newer release{} (v{} here){}...",
             if betas { " or beta" } else { "" },
-            update::VERSION,
+            update::version(),
             if over_tor { " through Tor" } else { "" }
         );
         let addr = proxy.as_ref().map(|p| p.addr.clone());

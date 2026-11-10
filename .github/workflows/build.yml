@@ -1,8 +1,9 @@
 # The release binaries (`just dist`), built twice from the same commit on two different systems in
 # two different folders, each binary in a job of its own so they build at once, which must give
-# the same bytes: releases are signed offline, and anyone
-# can check a published one against the source only because the build is reproducible. The
-# binaries are kept as artifacts, unsigned: chat's updater installs only what the release key signed.
+# the same bytes: anyone can check a published release against the source only because the build
+# is reproducible. The binaries are kept as artifacts, unsigned: chat's updater installs only what
+# the release key signed, which the Publish workflow does with the first build's, once an admin
+# approves.
 #
 # Rust comes from rust-toolchain.toml; zig and cargo-zigbuild are pinned here. A release built
 # with others won't match what this builds, so they change together.
@@ -24,6 +25,7 @@ on:
   schedule:
     - cron: "41 4 * * 1"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

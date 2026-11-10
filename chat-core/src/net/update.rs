@@ -25,7 +25,21 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The version of the program chat-core runs in: what it's updated from, and what peers are told
+/// its build is. An interface with its own version sets it as it starts (see [`set_version`]);
+/// otherwise it's chat-core's own, which chat-json's is.
+pub fn version() -> &'static str {
+    PROGRAM_VERSION.get_or_init(|| env!("CARGO_PKG_VERSION"))
+}
+
+/// Sets [`version`], before anything reads it: an interface calls it first thing, before it makes
+/// a `Client`, which reads this program's build.
+pub fn set_version(v: &'static str) {
+    let set = PROGRAM_VERSION.set(v).is_ok();
+    debug_assert!(set || version() == v, "update::set_version after the version was read");
+}
+
+static PROGRAM_VERSION: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 const REPO: &str = "chat-labs/chat";
 /// The most a download may be, and how long curl gets for one.
 const MAX_BYTES: u64 = 64 << 20;
@@ -411,6 +425,19 @@ fn sums_lookup(sums: &[u8], name: &str) -> Option<[u8; 32]> {
     None
 }
 
+/// The newest of chat's releases in GitHub's list of releases, as its own JSON. The list has
+/// chat-core's too, tagged chat-core-vVERSION, which have nothing to install.
+fn newest_chat_release(list: &[u8]) -> Option<Vec<u8>> {
+    let list: Vec<serde_json::Value> = serde_json::from_slice(list).ok()?;
+    let chat = list.iter().find(|r| {
+        r["tag_name"]
+            .as_str()
+            .and_then(|t| t.strip_prefix('v'))
+            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+    })?;
+    serde_json::to_vec(chat).ok()
+}
+
 /// The size GitHub gives for the release file called name, or 0 if it isn't there. It's only for
 /// the progress bar: the file is checked by the signed SHA-256.
 fn asset_size(json: &[u8], name: &str) -> u64 {
@@ -482,7 +509,7 @@ fn read_self_build() -> Option<crate::protocol::session::Build> {
     let mut f = std::fs::File::open(exe_path()?).ok()?;
     let size = f.metadata().ok()?.len();
     let mut b = crate::protocol::session::Build {
-        version: VERSION.to_string(),
+        version: version().to_string(),
         ..Default::default()
     };
     let mut core = size;
@@ -525,7 +552,7 @@ fn parse_build_list(text: &[u8]) -> Option<(String, String)> {
     let (first, rest) = lines.split_first()?;
     let (sig, hashes) = rest.split_last()?;
     let hex_ok = |h: &&str| h.len() == 64 && h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'));
-    (*first == format!("chat v{VERSION}")
+    (*first == format!("chat v{}", version())
         && sig.len() == SIG_LINE_LEN
         && !hashes.is_empty()
         && hashes.len() <= HASHES_MAX
@@ -592,14 +619,17 @@ fn check(betas: bool, proxy: Option<&str>) -> Result<String, String> {
         with_suffix(&exe, ".download"),
     );
 
-    say(LineKind::Info, format!("this is v{VERSION}, {asset}"));
+    let this = version();
+    say(LineKind::Info, format!("this is v{this}, {asset}"));
     if let Some(p) = proxy {
         say(LineKind::Detail, format!("downloads go through Tor ({p})"));
     }
     // GitHub's latest release is never a pre-release, so betas come from the list, newest first.
+    // chat-core's releases are never the latest either, but they're in the list: it's searched for
+    // the newest of chat's.
     let url = format!(
         "https://api.github.com/repos/{REPO}/releases{}",
-        if betas { "?per_page=1" } else { "/latest" }
+        if betas { "?per_page=20" } else { "/latest" }
     );
     say(LineKind::Detail, format!("GET {}", shown(&url)));
     let got = fetch(&url, &tmp_json, true, proxy);
@@ -611,7 +641,10 @@ fn check(betas: bool, proxy: Option<&str>) -> Result<String, String> {
             exe.display()
         ));
     }
-    let json = json.unwrap_or_default();
+    let mut json = json.unwrap_or_default();
+    if betas {
+        json = newest_chat_release(&json).unwrap_or_default();
+    }
     let tag = parse_tag(&json).ok_or("GitHub's reply had no usable release tag")?;
     let total = asset_size(&json, &asset);
     say(
@@ -622,12 +655,12 @@ fn check(betas: bool, proxy: Option<&str>) -> Result<String, String> {
             format!("latest release is {tag}")
         },
     );
-    if !version_newer(&tag, VERSION) {
+    if !version_newer(&tag, this) {
         stage(AT_DONE, "Already up to date");
         return Ok(if betas {
-            format!("already up to date (v{VERSION}, newest with betas is {tag})")
+            format!("already up to date (v{this}, newest with betas is {tag})")
         } else {
-            format!("already up to date (v{VERSION}, latest is {tag})")
+            format!("already up to date (v{this}, latest is {tag})")
         });
     }
     stage(AT_FOUND, format!("Release {tag} found"));
@@ -1010,22 +1043,32 @@ mod tests {
     #[test]
     fn build_list_is_read_for_this_version_only() {
         let (h1, h2, sig) = ("a".repeat(64), "0".repeat(64), "R".repeat(100));
-        let list = format!("chat v{VERSION}\n{h1}\n{h2}\n{sig}\n");
+        let v = version();
+        let list = format!("chat v{v}\n{h1}\n{h2}\n{sig}\n");
         assert_eq!(parse_build_list(list.as_bytes()), Some((format!("{h1},{h2}"), sig.clone())));
         // Another version's, uppercase hex, more than 3 hashes, none, or a short signature.
         assert_eq!(parse_build_list(format!("chat v0.0.1\n{h1}\n{sig}\n").as_bytes()), None);
+        assert_eq!(parse_build_list(format!("chat v{v}\n{}\n{sig}\n", "A".repeat(64)).as_bytes()), None);
         assert_eq!(
-            parse_build_list(format!("chat v{VERSION}\n{}\n{sig}\n", "A".repeat(64)).as_bytes()),
+            parse_build_list(format!("chat v{v}\n{h1}\n{h1}\n{h1}\n{h1}\n{sig}\n").as_bytes()),
             None
         );
-        assert_eq!(
-            parse_build_list(format!("chat v{VERSION}\n{h1}\n{h1}\n{h1}\n{h1}\n{sig}\n").as_bytes()),
-            None
-        );
-        assert_eq!(parse_build_list(format!("chat v{VERSION}\n{sig}\n").as_bytes()), None);
-        assert_eq!(parse_build_list(format!("chat v{VERSION}\n{h1}\nshort\n").as_bytes()), None);
+        assert_eq!(parse_build_list(format!("chat v{v}\n{sig}\n").as_bytes()), None);
+        assert_eq!(parse_build_list(format!("chat v{v}\n{h1}\nshort\n").as_bytes()), None);
         // Each line ends with a newline.
-        assert_eq!(parse_build_list(format!("chat v{VERSION}\n{h1}\n{sig}").as_bytes()), None);
+        assert_eq!(parse_build_list(format!("chat v{v}\n{h1}\n{sig}").as_bytes()), None);
+    }
+
+    #[test]
+    fn betas_come_from_the_newest_of_chats_releases() {
+        let list = br#"[{"tag_name":"chat-core-v0.1.0","assets":[]},
+            {"tag_name":"v0.6.2-beta.1","assets":[{"name":"chat-linux-x86_64","size":7}]},
+            {"tag_name":"v0.6.1","assets":[]}]"#;
+        let r = newest_chat_release(list).unwrap();
+        assert_eq!(parse_tag(&r).as_deref(), Some("v0.6.2-beta.1"));
+        assert_eq!(asset_size(&r, "chat-linux-x86_64"), 7);
+        assert_eq!(newest_chat_release(br#"[{"tag_name":"chat-core-v0.1.0"}]"#), None);
+        assert_eq!(newest_chat_release(b"not json"), None);
     }
 
     #[test]

@@ -181,6 +181,13 @@ Every improvement is sender-side, so nothing changes on the wire:
 - **Device locks and security keys on macOS** (the Secure Enclave, IOHID). Windows has both: its
   TPM through NCrypt (DPAPI without one), and security keys through WebAuthn.
 
+## Releases
+
+chat-core has its own version, and its releases are tagged `chat-core-vVERSION`, with what each
+changed in [CHANGELOG.md](CHANGELOG.md). [The top README](../README.md#releases) has how a release
+is made. A program that isn't chat-json sets its own version with `net::update::set_version` as
+it starts: it's what it updates from, and what peers are told its build is.
+
 ## Building and testing
 
 [just](https://github.com/casey/just) runs the usual things, in this folder or as `just core::...`
