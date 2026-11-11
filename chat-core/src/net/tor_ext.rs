@@ -240,6 +240,11 @@ fn field(line: &str, key: &str) -> Option<String> {
     }
 }
 
+/// A reply field in hex, which tor writes in capitals.
+fn hex_field(line: &str, key: &str) -> Option<Vec<u8>> {
+    hex::decode(&field(line, key)?.to_ascii_lowercase())
+}
+
 impl Control {
     /// One command and its reply's lines, without their status codes. An error reply is an Err.
     async fn command(&mut self, line: &str) -> Result<Vec<String>, String> {
@@ -335,12 +340,8 @@ impl ExtTor {
                 let mine: [u8; 32] = sodium::random_array();
                 let reply = c.command(&format!("AUTHCHALLENGE SAFECOOKIE {}", hex::encode(&mine))).await?;
                 let line = reply.first().cloned().unwrap_or_default();
-                let theirs = field(&line, "SERVERNONCE")
-                    .and_then(|h| hex::decode(&h))
-                    .ok_or("tor's challenge is malformed")?;
-                let proof = field(&line, "SERVERHASH")
-                    .and_then(|h| hex::decode(&h))
-                    .ok_or("tor's challenge is malformed")?;
+                let theirs = hex_field(&line, "SERVERNONCE").ok_or("tor's challenge is malformed")?;
+                let proof = hex_field(&line, "SERVERHASH").ok_or("tor's challenge is malformed")?;
                 let expected = safecookie_hash(b"Tor safe cookie authentication server-to-controller hash", &cookie, &mine, &theirs);
                 if !sodium::ct_eq(&proof, &expected) {
                     return Err("that isn't the tor whose cookie this is".into());
@@ -512,6 +513,9 @@ mod tests {
         assert_eq!(field(auth, "COOKIEFILE").as_deref(), Some("/run/tor/control.authcookie"));
         assert_eq!(field(r#"X="a \"b\" c""#, "X").as_deref(), Some(r#"a "b" c"#));
         assert_eq!(quoted(r#"p"w\d"#), r#""p\"w\\d""#);
+        let challenge = "AUTHCHALLENGE SERVERHASH=0A1B SERVERNONCE=FF00";
+        assert_eq!(hex_field(challenge, "SERVERHASH"), Some(vec![0x0a, 0x1b]));
+        assert_eq!(hex_field(challenge, "SERVERNONCE"), Some(vec![0xff, 0x00]));
         // 16:, then the salt, the count byte and SHA-1's 20 bytes, in hex.
         let h = hash_password("secret", [1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(h.starts_with("16:010203040506070860") && h.len() == 3 + 2 * 29, "{h}");
