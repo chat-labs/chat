@@ -477,7 +477,7 @@ impl State {
                     .ok_or_else(|| format!("can't use {p} as tor - it has to be a full path to a program only root or you can change"))?;
                 rows.set("torpath", &found.to_string_lossy())?;
             }
-            self.client.set_tor_use(rows.tor_use(field("password").unwrap_or("")));
+            self.client.set_tor_use(rows.tor_use(field("password").unwrap_or_default()));
         }
         // Both at the top level and inside route, where apps put them too.
         cfg.route.port = v.get("port").or_else(|| route.get("port")).and_then(Value::as_u64).unwrap_or(0) as u16;
