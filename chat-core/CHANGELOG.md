@@ -17,3 +17,8 @@ chat's JSON interface.
 ### Changed
 
 - `/update`, with betas on, takes the newest of chat's releases, not chat-core's.
+
+### Fixed
+
+- chat-json's `start` uses the tor in its route's `tor` (`socks`, `control`, `password`,
+  `launch` and `path`), which it read past before, so a room always took the defaults.
