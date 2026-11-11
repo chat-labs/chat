@@ -917,6 +917,13 @@ async fn serve_lines(mut lines: tokio::sync::mpsc::UnboundedReceiver<String>) {
                 emit(json!({"t": "bye"}));
                 return;
             }
+            // A new room's id and password, made up as start makes them, for a program to show
+            // before the room opens and let its user change.
+            Some("suggest") => {
+                if !emit(json!({"t": "suggest", "room": names::random_room_id(), "password": names::random_password()})) {
+                    return;
+                }
+            }
             Some("start") => {
                 let cfg = match st.start_config(&v) {
                     Ok(c) => c,

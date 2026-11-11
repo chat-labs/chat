@@ -13,6 +13,8 @@ chat's JSON interface.
 - `net::update::set_version` and `net::update::version`: the version of the program chat-core
   runs in, which it updates from and tells peers its build is. An interface with its own version
   sets it as it starts; chat-json's is chat-core's.
+- chat-json's `suggest`, before `start`: a new room's id and password, made up as `start`
+  makes them, for a program to show and let its user change.
 
 ### Changed
 

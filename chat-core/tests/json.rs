@@ -44,3 +44,16 @@ async fn start_uses_the_route_tor() {
     let out = serve(&[json!({"cmd": "start", "create": true, "route": {"mode": "tor", "tor": tor}})]).await;
     assert!(error_of(&out).contains("torlaunch never"), "{out:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn suggests_a_new_room() {
+    let out = serve(&[json!({"cmd": "suggest"}), json!({"cmd": "suggest"}), json!({"cmd": "quit"})]).await;
+    let s: Vec<&Value> = out.iter().filter(|v| v["t"] == "suggest").collect();
+    assert_eq!(s.len(), 2, "{out:?}");
+    for v in &s {
+        assert_eq!(v["room"].as_str().unwrap().len(), chat_core::protocol::names::ROOM_ID_LEN);
+        assert_eq!(v["password"].as_str().unwrap().split(' ').count(), 8, "{v}");
+    }
+    assert_ne!(s[0]["room"], s[1]["room"]);
+    assert_eq!(out.last().unwrap()["t"], "bye");
+}
