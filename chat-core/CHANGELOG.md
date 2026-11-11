@@ -22,3 +22,5 @@ chat's JSON interface.
 
 - chat-json's `start` uses the tor in its route's `tor` (`socks`, `control`, `password`,
   `launch` and `path`), which it read past before, so a room always took the defaults.
+- Logging in to a running tor with its cookie (SAFECOOKIE) works: tor's challenge is in capital
+  hex, which was taken as malformed.
