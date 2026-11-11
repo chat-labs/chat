@@ -460,6 +460,25 @@ impl State {
         if let Some(relays) = route.get("relays").and_then(Value::as_array) {
             cfg.route.relays = relays.iter().filter_map(Value::as_str).map(str::to_string).collect();
         }
+        // A tor that's already running, or the one to start, as the Tor rows of the settings have it.
+        if let Some(t) = route.get("tor") {
+            let field = |k: &str| t.get(k).and_then(Value::as_str);
+            let mut rows = net::settings::Settings::default();
+            for (k, row) in [("socks", "torsocks"), ("control", "torcontrol")] {
+                if let Some(x) = field(k) {
+                    rows.set(row, x).map_err(|_| "tor \"socks\" and \"control\" are host:port")?;
+                }
+            }
+            if let Some(x) = field("launch") {
+                rows.set("torlaunch", x).map_err(|_| "tor \"launch\" is auto, always or never")?;
+            }
+            if let Some(p) = field("path") {
+                let found = net::tor_ext::tor_program(p)
+                    .ok_or_else(|| format!("can't use {p} as tor - it has to be a full path to a program only root or you can change"))?;
+                rows.set("torpath", &found.to_string_lossy())?;
+            }
+            self.client.set_tor_use(rows.tor_use(field("password").unwrap_or("")));
+        }
         // Both at the top level and inside route, where apps put them too.
         cfg.route.port = v.get("port").or_else(|| route.get("port")).and_then(Value::as_u64).unwrap_or(0) as u16;
         if let Some(peers) = v.get("peers").or_else(|| route.get("peers")).and_then(Value::as_array) {
