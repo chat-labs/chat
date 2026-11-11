@@ -26,3 +26,5 @@ chat's JSON interface.
   `launch` and `path`), which it read past before, so a room always took the defaults.
 - Logging in to a running tor with its cookie (SAFECOOKIE) works: tor's challenge is in capital
   hex, which was taken as malformed.
+- chat-json's `start` for a new room with an id and no password makes one up in words, as
+  without the id, instead of opening it with an empty password.

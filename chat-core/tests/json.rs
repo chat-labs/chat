@@ -57,3 +57,13 @@ async fn suggests_a_new_room() {
     assert_ne!(s[0]["room"], s[1]["room"]);
     assert_eq!(out.last().unwrap()["t"], "bye");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_room_with_an_id_gets_a_password_in_words() {
+    let route = json!({"mode": "udp", "dht": false, "lan": false, "portmap": false, "nostr": "off"});
+    let start = json!({"cmd": "start", "create": true, "room": "ABCDEFGHJK", "route": route});
+    let out = serve(&[start, json!({"cmd": "quit"})]).await;
+    let ready = out.iter().find(|v| v["t"] == "ready").unwrap_or_else(|| panic!("{out:?}"));
+    assert_eq!(ready["room"], "ABCDEFGHJK");
+    assert_eq!(ready["password"].as_str().unwrap().split(' ').count(), 8, "{ready}");
+}

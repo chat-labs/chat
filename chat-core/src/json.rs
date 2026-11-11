@@ -422,7 +422,9 @@ impl State {
             cfg.create = false;
             cfg.verify_required = true;
         } else if cfg.password.is_none() && cfg.room.is_some() && cfg.invite.is_none() {
-            cfg.password = Some(std::env::var("CHAT_PASSWORD").unwrap_or_default());
+            // A new room gets one in words, as the id is often passed around in the open.
+            let made = || cfg.create.then(names::random_password);
+            cfg.password = Some(std::env::var("CHAT_PASSWORD").ok().or_else(made).unwrap_or_default());
         }
         cfg.nick = s("nick").unwrap_or_else(names::random_nick);
         if let Some(c) = s("colour") {
