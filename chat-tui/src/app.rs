@@ -278,8 +278,6 @@ pub enum PromptKind {
     JoinId,
     /// The password for this room id.
     JoinPassword(String),
-    /// Which save to open, from several.
-    PickSave,
     /// A save's passphrase, as chat starts.
     Unlock(String),
     /// A save's authenticator code.
@@ -367,6 +365,11 @@ pub enum Modal {
         sel: usize,
         forgetting: bool,
     },
+    /// The saves to open one of, by name, and the one picked.
+    PickSave {
+        names: Vec<String>,
+        sel: usize,
+    },
     /// A link from the chat, before it's opened: (the link, who sent it, when), newest first.
     Link {
         links: Vec<(String, String, String)>,
@@ -380,6 +383,17 @@ pub enum Modal {
     },
     /// /update's progress. Closing it leaves the update running.
     Update,
+}
+
+impl Modal {
+    /// Settings, a folder browser, the files, a picture and the help fill the screen; every other
+    /// modal is a box over the chat, or over the page it was opened from.
+    pub fn is_page(&self) -> bool {
+        matches!(
+            self,
+            Modal::Settings(_) | Modal::Browser(_) | Modal::Files(_) | Modal::Picture(_) | Modal::Help(_)
+        )
+    }
 }
 
 /// What a box that asks is about.
@@ -759,7 +773,7 @@ impl App {
                     format!(
                         "update: checking GitHub for a newer release{} (v{} here)...",
                         if betas { " or beta" } else { "" },
-                        update::VERSION
+                        update::version()
                     ),
                 );
             }
@@ -817,17 +831,44 @@ impl App {
                 room.set_identity(self.base.identity.clone());
             }
         }
-        match &ident {
-            Some(i) => {
-                let lines = i.describe();
+        let lines = ident.as_ref().map(Ident::describe);
+        self.ident = ident;
+        let Some(lines) = lines else {
+            return self.say("not signing now: peers see you as unverified");
+        };
+        match self.take_settings() {
+            // Chosen from the signing identity's page: back to the settings, which show it.
+            Some(mut p) => {
+                p.pick = None;
+                self.show_page(p);
+            }
+            None => {
                 self.modal = Some(Modal::Info {
-                    title: " Signing identity ".into(),
+                    title: "SIGNING IDENTITY".into(),
                     lines,
                 });
             }
-            None => self.say("not signing now: peers see you as unverified"),
         }
-        self.ident = ident;
+    }
+
+    /// The settings page, from the screen, or from under the box or the folder browser over it.
+    fn take_settings(&mut self) -> Option<crate::settings_page::Page> {
+        if let Some(Modal::Settings(_)) = &self.modal
+            && let Some(Modal::Settings(p)) = self.modal.take()
+        {
+            return Some(p);
+        }
+        match self.behind.take().map(|m| *m) {
+            Some(Modal::Settings(p)) => Some(p),
+            Some(Modal::Browser(b)) if matches!(b.back, crate::browser::Back::Page(_)) => match b.back {
+                crate::browser::Back::Page(p) => Some(p),
+                _ => None,
+            },
+            other => {
+                self.behind = other.map(Box::new);
+                None
+            }
+        }
     }
 
     fn prompt_key_password(&mut self, kind: IdentityKind, with_nick: bool) {
@@ -845,7 +886,7 @@ impl App {
         };
         self.modal = Some(Modal::Prompt {
             kind: PromptKind::KeyPassword { kind, with_nick },
-            title: " Make your signing key ".into(),
+            title: format!("NATIVE {} KEY", if kind == IdentityKind::Pgp { "PGP" } else { "AGE" }),
             hint,
             input: Input::default(),
         });
@@ -1259,18 +1300,15 @@ impl App {
     }
 
     pub fn on_msg(&mut self, msg: Msg) {
-        // A save's news can open a box; over a page, the page comes back once it closes.
-        let page = match (&msg, &self.modal) {
-            (Msg::Save(_), Some(Modal::Settings(_) | Modal::Browser(_))) => self.modal.take(),
-            _ => None,
-        };
+        // A message can open a box (a save's news, a key made from its password); over a page, the
+        // page is under it while it's handled, and comes back once the box closes.
+        let page = matches!(msg, Msg::Save(_) | Msg::Identity(_)) && self.modal.as_ref().is_some_and(Modal::is_page);
+        if page {
+            self.behind = self.modal.take().map(Box::new);
+        }
         self.handle_msg(msg);
-        if let Some(p) = page {
-            if self.modal.is_none() {
-                self.modal = Some(p);
-            } else {
-                self.behind = Some(Box::new(p));
-            }
+        if page {
+            self.back_to_page();
         }
     }
 
@@ -1507,6 +1545,13 @@ impl App {
             TermEvent::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k).await,
             // A paste's letters would answer the QUIT box.
             TermEvent::Paste(_) | TermEvent::Mouse(_) if self.asking_quit => {}
+            // Locked, only the passphrase box takes anything: what's under it is out of reach.
+            TermEvent::Paste(text) if self.locked.is_some() => {
+                if let Some(l) = self.locked.as_mut().filter(|l| !l.busy) {
+                    text.replace(['\r', '\n'], "").chars().for_each(|c| l.input.insert(c));
+                }
+            }
+            TermEvent::Mouse(_) if self.locked.is_some() => {}
             // The wheel scrolls what it's over: the console, or the chat.
             TermEvent::Mouse(m) if self.modal.is_none() => {
                 let by: isize = match m.kind {
@@ -1727,9 +1772,6 @@ impl App {
 
     fn join_id_typed(&mut self, text: &str) {
         let id = text.trim();
-        if id.is_empty() {
-            return self.fail("type the room's id - or Esc to cancel");
-        }
         if chat_core::protocol::names::is_invite(id) {
             return self.join(id);
         }
@@ -1758,18 +1800,7 @@ impl App {
             } => match k.code {
                 KeyCode::Esc => match kind {
                     PromptKind::Nick => self.say(format!("you're {}", self.nick)),
-                    // As chat starts, it goes on with its defaults; later, from /install, nothing opens.
-                    PromptKind::PickSave | PromptKind::Unlock(_) | PromptKind::Code if self.start.is_none() => {
-                        self.pending_code = None;
-                        self.pending_factor = None;
-                        self.overwriting = false;
-                        self.say("nothing was opened");
-                    }
-                    PromptKind::PickSave | PromptKind::Unlock(_) | PromptKind::Code => {
-                        self.pending_code = None;
-                        self.say("started without the save: chat's defaults, and nothing you change is saved");
-                        self.begin_start(false);
-                    }
+                    PromptKind::Unlock(_) | PromptKind::Code => self.unlock_skipped(),
                     PromptKind::Install(_) => {
                         self.pending_factor = None;
                         self.say("not installed - nothing was written");
@@ -1785,13 +1816,18 @@ impl App {
                 },
                 KeyCode::Enter => {
                     let text = input.text();
+                    // A field that's refused stays open with what was typed, to fix or Esc.
+                    if let Some(why) = self.refused(&kind, &text) {
+                        self.fail(why);
+                        self.modal = Some(Modal::Prompt { kind, title, hint, input });
+                        return;
+                    }
                     match kind {
                         PromptKind::Nick => self.set_nick(text.trim()).await,
                         PromptKind::NewRoom => self.create_room(Some(text.trim().to_string())),
                         PromptKind::JoinId => self.join_id_typed(&text),
                         PromptKind::JoinPassword(id) => self.join(&format!("{id} {}", text.trim())),
                         PromptKind::KeyPassword { kind, with_nick } => self.make_key(kind, &text, with_nick),
-                        PromptKind::PickSave => self.pick_save(&text),
                         PromptKind::Unlock(name) => self.unlock(name, zeroize::Zeroizing::new(text)),
                         PromptKind::Code => self.check_code(text),
                         PromptKind::Install(crate::saved::Installing::Name) => self.install_name(&text),
@@ -1886,6 +1922,7 @@ impl App {
             Modal::Files(num) => self.files_key(num, k).await,
             Modal::Picture(num) => self.picture_key(num, k).await,
             Modal::Rooms { sel, forgetting } => self.rooms_key(sel, forgetting, k),
+            Modal::PickSave { names, sel } => self.pick_save_key(names, sel, k),
             Modal::Link { links, at } => match k.code {
                 KeyCode::Char('j') | KeyCode::Down if at + 1 < links.len() => self.modal = Some(Modal::Link { links, at: at + 1 }),
                 KeyCode::Char('k') | KeyCode::Up if at > 0 => self.modal = Some(Modal::Link { links, at: at - 1 }),
@@ -1978,6 +2015,25 @@ impl App {
             },
             None => Err("start a room first: Ctrl+N makes one, Ctrl+J joins one".into()),
         }
+    }
+
+    /// /leave: the room on screen goes, open, opening, failed or closed. Its history is written
+    /// first, as its view goes with it.
+    async fn leave_room(&mut self) -> Result<(), String> {
+        let r = self.room().ok_or("no room is open here")?;
+        let (id, room) = (r.id, r.room().cloned());
+        let written = self.write_history(id, true);
+        // An opening room leaves once it opens, its handle dropped with nowhere to go.
+        if let Some(room) = room {
+            room.leave().await;
+        }
+        self.rooms.remove(self.current);
+        self.current = self.current.min(self.rooms.len().saturating_sub(1));
+        if !written {
+            return Err("left the room, but its history couldn't be written to the save".into());
+        }
+        self.say("left the room");
+        Ok(())
     }
 
     /// The answer to a command that sent one of our messages: remembered for its ticks.
@@ -2107,10 +2163,7 @@ impl App {
             "uninstall" => self.uninstall_command(arg),
             "keep" => self.keep_command(arg),
             "set" => self.set_command(arg).await,
-            "quit" | "q" | "exit" | "close" | "bd" | "bw" => {
-                self.quit = true;
-                Ok(())
-            }
+            "leave" | "part" => self.leave_room().await,
             "nick" | "name" => {
                 if arg.is_empty() {
                     Err(format!("you're {} - /nick NAME changes it", self.nick))
@@ -2531,15 +2584,6 @@ impl App {
                     .parse()
                     .map_err(|_| "usage: /cancel N - stops fetching file N, or stops offering one of yours")?;
                 room.cancel(num).await.map_err(|e| e.to_string())?;
-            }
-            "leave" | "part" => {
-                room.leave().await;
-                let r = self.room_mut().expect("open");
-                r.state = RoomState::Closed;
-                let i = self.current;
-                self.rooms.remove(i);
-                self.current = self.current.min(self.rooms.len().saturating_sub(1));
-                self.say("left the room");
             }
             other => return Err(format!("no command /{other} - /help lists them")),
         }

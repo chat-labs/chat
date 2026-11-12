@@ -63,9 +63,8 @@ impl App {
             None if list.len() == 1 => list[0].name.clone(),
             None if list.is_empty() => return self.begin_start(false),
             None => {
-                let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
-                let hint = format!("Your saves: {}. Type one's name; Esc starts without any.", names.join(", "));
-                return self.prompt(PromptKind::PickSave, " Open a save ", hint);
+                let names = list.into_iter().map(|s| s.name).collect();
+                return self.modal = Some(Modal::PickSave { names, sel: 0 });
             }
         };
         if let Ok(pass) = std::env::var("CHAT_INSTALL_PASSWORD") {
@@ -87,11 +86,35 @@ impl App {
             name,
             self.saves.as_ref().map(|s| s.shown_dir(&name)).unwrap_or_default()
         );
-        self.prompt(PromptKind::Unlock(name), " Open your save ", hint);
+        self.prompt(PromptKind::Unlock(name), "UNLOCK", hint);
     }
 
-    pub fn pick_save(&mut self, name: &str) {
-        self.ask_passphrase(name.trim().to_string());
+    /// Enter asks for the passphrase of the save picked; Esc opens none.
+    pub fn pick_save_key(&mut self, names: Vec<String>, sel: usize, k: crossterm::event::KeyEvent) {
+        use crate::settings_page::{ListKey, list_key};
+        let sel = match list_key(&k) {
+            ListKey::Choose | ListKey::Right => return self.ask_passphrase(names[sel].clone()),
+            ListKey::Left | ListKey::Back | ListKey::Close => return self.unlock_skipped(),
+            ListKey::Up => sel.saturating_sub(1),
+            ListKey::Down => (sel + 1).min(names.len() - 1),
+            ListKey::First => 0,
+            ListKey::Last => names.len() - 1,
+            _ => sel,
+        };
+        self.modal = Some(Modal::PickSave { names, sel });
+    }
+
+    /// Esc while a save is being opened: as chat starts, it goes on with its defaults; later, from
+    /// /install, nothing opens.
+    pub fn unlock_skipped(&mut self) {
+        self.pending_code = None;
+        if self.start.is_none() {
+            self.pending_factor = None;
+            self.overwriting = false;
+            return self.say("nothing was opened");
+        }
+        self.say("started without the save: chat's defaults, and nothing you change is saved");
+        self.begin_start(false);
     }
 
     /// Argon2id takes seconds and 512 MiB, off the UI's thread.
@@ -125,7 +148,7 @@ impl App {
             SaveMsg::Opened(name, Ok(Unlocked::Code(p))) => {
                 self.pending_code = Some(Box::new(p));
                 let hint = format!("{name} asks for your authenticator app's code too. Esc starts without the save.");
-                self.prompt(PromptKind::Code, " Authenticator code ", hint);
+                self.prompt(PromptKind::Code, "UNLOCK \u{b7} CODE", hint);
             }
             SaveMsg::Opened(name, Err(SaveError::Key)) if self.pending_key.is_none() => self.key_open(name, None),
             SaveMsg::KeySecret(name, r) => {
@@ -139,7 +162,7 @@ impl App {
                     }
                     Err(SaveError::KeyPin(why)) => {
                         let hint = format!("{why}. Esc starts without the save.");
-                        self.prompt(PromptKind::KeyPin(Some(name)), " Security key PIN ", hint);
+                        self.prompt(PromptKind::KeyPin(Some(name)), "SECURITY KEY \u{b7} PIN", hint);
                     }
                     Err(e) => {
                         self.pending_pass = None;
@@ -159,7 +182,7 @@ impl App {
                         self.save = Some(*save);
                         self.prompt(
                             PromptKind::KeyPin(None),
-                            " Security key PIN ",
+                            "SECURITY KEY \u{b7} PIN",
                             format!("{why}. Esc registers none."),
                         );
                     }
@@ -188,7 +211,7 @@ impl App {
                 self.fail(format!("{e}"));
                 self.prompt(
                     PromptKind::Code,
-                    " Authenticator code ",
+                    "UNLOCK \u{b7} CODE",
                     "Try the code again. Esc starts without the save.".into(),
                 );
             }
@@ -488,14 +511,30 @@ impl App {
         Ok(())
     }
 
+    /// Why what was typed in a field can't be used, if it can't.
+    pub(crate) fn refused(&self, kind: &PromptKind, text: &str) -> Option<String> {
+        let t = text.trim();
+        match kind {
+            PromptKind::JoinId if t.is_empty() => Some("type the room's id - or Esc to cancel".into()),
+            PromptKind::Install(Installing::Name) if !t.is_empty() && !chat_core::net::saves::name_ok(t) && t != "default" => {
+                Some("a save's name is letters, digits, - and _ (up to 32)".into())
+            }
+            PromptKind::Install(Installing::Name) if self.saves.as_ref().is_some_and(|s| s.list().iter().any(|i| i.name == t)) => {
+                Some(format!("there's a save called {t} already - /uninstall {t} deletes it"))
+            }
+            PromptKind::Install(Installing::Pass(_)) if text.is_empty() => {
+                Some("what's saved needs a passphrase - or Esc to cancel".into())
+            }
+            _ => None,
+        }
+    }
+
     pub fn install_name(&mut self, name: &str) {
         let name = match name.trim() {
             "" => chat_core::protocol::names::random_nick(),
             n => n.to_string(),
         };
-        if !chat_core::net::saves::name_ok(&name) && name != "default" {
-            return self.fail("a save's name is letters, digits, - and _ (up to 32)");
-        }
+        // The random name too: a save is never made over another.
         if self.saves.as_ref().is_some_and(|s| s.list().iter().any(|i| i.name == name)) {
             return self.fail(format!("there's a save called {name} already - /uninstall {name} deletes it"));
         }
@@ -503,13 +542,10 @@ impl App {
     }
 
     pub fn install_pass(&mut self, name: String, pass: &str) {
-        if pass.is_empty() {
-            return self.fail("no passphrase, so nothing was saved");
-        }
         let hint = "The passphrase again.".to_string();
         self.prompt(
             PromptKind::Install(Installing::Again(name, Zeroizing::new(pass.into()))),
-            " Install ",
+            "INSTALL \u{b7} PASSPHRASE",
             hint,
         );
     }
@@ -555,7 +591,7 @@ impl App {
             "Type yes to delete {name} and everything in it. Deleting isn't erasing: the disk and backups can still \
              have it. Esc keeps it."
         );
-        self.prompt(PromptKind::Uninstall(name), " Uninstall ", hint);
+        self.prompt(PromptKind::Uninstall(name), "UNINSTALL", hint);
         Ok(())
     }
 
@@ -689,13 +725,14 @@ impl App {
         r.history = Some(h);
     }
 
-    /// A room's history written to the save, if it changed; `stop` stops keeping it.
-    pub(crate) fn write_history(&mut self, id: usize, stop: bool) {
+    /// A room's history written to the save, if it changed; `stop` stops keeping it. False if the
+    /// save refused it.
+    pub(crate) fn write_history(&mut self, id: usize, stop: bool) -> bool {
         let Some(r) = self.rooms.iter_mut().find(|r| r.id == id) else {
-            return;
+            return true;
         };
         let (Some(info), Some(h)) = (&r.info, r.history.as_mut()) else {
-            return;
+            return true;
         };
         let mut failed = false;
         if h.dirty {
@@ -714,6 +751,7 @@ impl App {
         if stop {
             r.history = None;
         }
+        !failed
     }
 
     /// `/history [forget [all]]`.
@@ -944,7 +982,7 @@ impl App {
             "lock" if now != "off" && self.save.is_none() && self.pin.is_none() => {
                 self.modal = Some(Modal::Prompt {
                     kind: PromptKind::SetPin,
-                    title: " Lock screen ".into(),
+                    title: "LOCK SCREEN \u{b7} PIN".into(),
                     hint: "No save is open, so the lock needs a PIN: chat keeps it hashed in memory until it exits.".into(),
                     input: Input::default(),
                 });
@@ -1010,7 +1048,7 @@ impl App {
                     .into();
                 self.modal = Some(Modal::Prompt {
                     kind: PromptKind::Shadow(None),
-                    title: " Shadow passphrase ".into(),
+                    title: "SHADOW PASSWORD".into(),
                     hint,
                     input: Input::default(),
                 });
@@ -1026,7 +1064,7 @@ impl App {
                 self.modal = Some(match chat_core::protocol::qr::encode(&uri) {
                     Some(qr) => Modal::Qr { invite: b32, qr, note },
                     None => Modal::Info {
-                        title: " Authenticator ".into(),
+                        title: "AUTHENTICATOR APP".into(),
                         lines: vec![b32, note],
                     },
                 });
@@ -1384,7 +1422,7 @@ impl App {
                     }
                 } else {
                     let hint = format!("A passphrase for {name}: long, since it's all that protects what's saved.");
-                    self.prompt(PromptKind::Install(Installing::Pass(name)), " Install ", hint);
+                    self.prompt(PromptKind::Install(Installing::Pass(name)), "INSTALL \u{b7} PASSPHRASE", hint);
                 }
             }
             (Ask::Install(name), _) => {
@@ -1401,8 +1439,9 @@ impl App {
                     .saves
                     .as_ref()
                     .map_or(Vec::new(), |s| s.list().into_iter().map(|i| i.name).collect());
-                let hint = format!("Your saves: {}. Type one's name; Esc cancels.", names.join(", "));
-                self.prompt(PromptKind::PickSave, " Open a save ", hint);
+                if !names.is_empty() {
+                    self.modal = Some(Modal::PickSave { names, sel: 0 });
+                }
             }
             (Ask::UseSave(_), Some(false)) => self.install_new(),
             (Ask::UseSave(_), None) => self.install_cancelled("not installed - nothing was written"),
@@ -1462,7 +1501,7 @@ impl App {
                     goes in saves/NAME in chat's folder (default is the folder itself), and anyone who can read the disk \
                     can see the folder's name."
             .to_string();
-        self.prompt(PromptKind::Install(Installing::Name), " Install ", hint);
+        self.prompt(PromptKind::Install(Installing::Name), "INSTALL \u{b7} NEW SAVE", hint);
     }
 
     /// The factor /install was for, set up on the save it made or opened.
@@ -1483,7 +1522,7 @@ impl App {
             let kind = PromptKind::Shadow(Some(Zeroizing::new(pass.to_string())));
             self.modal = Some(Modal::Prompt {
                 kind,
-                title: " Shadow passphrase ".into(),
+                title: "SHADOW PASSWORD".into(),
                 hint: "The shadow passphrase again.".into(),
                 input,
             });
@@ -1505,7 +1544,7 @@ impl App {
         let hint = "The code your authenticator app shows now.".into();
         self.modal = Some(Modal::Prompt {
             kind: PromptKind::NewCode,
-            title: " Authenticator ".into(),
+            title: "AUTHENTICATOR APP".into(),
             hint,
             input: Input::default(),
         });

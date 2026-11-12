@@ -2,7 +2,7 @@
 // Copyright (C) 2026 finlay@tuta.com
 //! Drawing: the sidebar (rooms, people), the messages, the input line, the hint bar, and dialogs.
 
-use crate::app::{App, EntryKind, Modal, PromptKind, RoomState, RoomView, SPINNER};
+use crate::app::{App, EntryKind, Input, Modal, PromptKind, RoomState, RoomView, SPINNER};
 use crate::text::{hhmm, width, wrap};
 use chat_core::{CodeState, Colour, FileState, Level, RouteMode};
 use ratatui::Frame;
@@ -10,9 +10,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph, Widget};
 
-/// The terminal's background, once it has said what it is.
 /// The terminal's background, once it has said what it is: 0, or 1 << 24 and its RGB.
 static BACKGROUND: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -70,49 +69,121 @@ fn sel_bg() -> Option<Color> {
     Some(Color::Rgb(s[0], s[1], s[2]))
 }
 
-fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+/// What the bottom row says: where you are (the chip, in the tone of what the keys do there), and
+/// what the keys do. The lock screen's is anonymous: it doesn't say who you are.
+struct Bar {
+    chip: String,
+    tone: Color,
+    hint: String,
+    anonymous: bool,
 }
 
-fn block(title: impl Into<Line<'static>>) -> Block<'static> {
-    Block::bordered().border_type(BorderType::Rounded).border_style(dim()).title(title)
+impl Bar {
+    /// A page's, or a box's: in the pages' and prompts' colour.
+    fn page(chip: &str, hint: &str) -> Bar {
+        Bar {
+            chip: chip.into(),
+            tone: Color::Magenta,
+            hint: hint.into(),
+            anonymous: false,
+        }
+    }
 }
 
+/// Everything is drawn in the terminal's own colours: its foreground and background, faint text
+/// for what's secondary (box borders among it), and its palette for accents. So the UI matches the
+/// terminal's theme, whatever it is. Peers' colours are the only exception (see readable()).
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    // Locked, nothing but the box for the passphrase is drawn.
+    let [frame, bar_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    // Locked: nothing says whose chat it is, or which save.
     if let Some(lock) = &app.locked {
-        let r = centered(area, 60, 7);
-        let what = if app.save.is_some() || lock.busy && app.pin.is_none() {
-            "the save's passphrase"
-        } else {
-            "your PIN"
+        f.render_widget(Clear, frame);
+        let d = lock_dialog(app, lock);
+        let cursor = draw_dialog(f, frame, &d);
+        let bar = Bar {
+            anonymous: true,
+            ..Bar::page("LOCKED", &d.keys)
         };
-        let lines = vec![
-            Line::raw(format!(" Locked. Type {what}, then Enter.")),
-            Line::raw(""),
-            Line::raw(format!(" {}", "\u{2022}".repeat(lock.input.text().chars().count()))),
-            Line::styled(
-                format!(
-                    " {}",
-                    if lock.busy {
-                        "checking..."
-                    } else {
-                        lock.why.as_deref().unwrap_or("")
-                    }
-                ),
-                Style::default().fg(Color::Red),
-            ),
-        ];
-        f.render_widget(Paragraph::new(lines).block(block(" chat ")), r);
+        draw_status(f, app, bar_area, &bar);
+        if let Some(c) = cursor {
+            f.set_cursor_position(c);
+        }
         return;
     }
-    // One frame: the sidebar's right side is the chat's left, and the chat's bottom edge is the
-    // input box's top. The bottom row says what's going on.
-    let [frame, bar] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-    let boxed = area.height >= BOXED_ROWS && area.width >= BOXED_COLS;
+    // A page, or the chat; then the box over it, if one is open.
+    let page = match &app.modal {
+        Some(m) if m.is_page() => Some(m),
+        Some(_) => app.behind.as_deref().filter(|m| m.is_page()),
+        None => None,
+    };
+    let over = app.modal.as_ref().is_some_and(|m| !m.is_page()) || app.key_wait.is_some() || app.asking_quit;
+    let (mut bar, mut cursor) = match page {
+        Some(m) => draw_page_modal(f, app, m, frame),
+        None => draw_chat(f, app, frame, over),
+    };
+    if let Some(m) = app.modal.as_ref().filter(|m| !m.is_page()) {
+        let (d, chip) = modal_dialog(app, m);
+        cursor = match m {
+            Modal::Update => draw_update(f, frame),
+            _ => draw_dialog(f, frame, &d),
+        };
+        // Over a page, the bar still says which.
+        bar = Bar::page(if page.is_some() { &bar.chip } else { chip }, &d.keys);
+    }
+    // A security key being waited for: what to do with it, over everything.
+    if let Some(w) = &app.key_wait {
+        use chat_core::net::seckey::Wait;
+        let stage = w.stage.load(std::sync::atomic::Ordering::Acquire);
+        let text = match (stage, &app.key_save) {
+            (Wait::LOOKING, None) => "Plug in your security key.".to_string(),
+            (Wait::LOOKING, Some(s)) => format!("Plug in the security key the save {s} was locked with."),
+            (Wait::TOUCH, None) => format!(
+                "Touch your security key now ({} of 2): it's blinking.",
+                w.touches.load(std::sync::atomic::Ordering::Acquire) + 1
+            ),
+            (Wait::TOUCH, Some(s)) => format!("Touch your security key now, to open {s}: it's blinking."),
+            _ => "Asking the security key...".into(),
+        };
+        let d = Dialog {
+            title: "SECURITY KEY".into(),
+            text: paras(&[text]),
+            keys: "esc cancel".into(),
+            ..Dialog::default()
+        };
+        draw_dialog(f, frame, &d);
+        cursor = None;
+        let chip = match (&app.key_save, page) {
+            (Some(_), _) => "UNLOCK",
+            (None, Some(_)) => &bar.chip,
+            (None, None) => "SETTINGS",
+        };
+        bar = Bar::page(chip, &d.keys);
+    }
+    if app.asking_quit {
+        let d = Dialog {
+            title: "QUIT".into(),
+            text: paras(&app.quit_paras()),
+            keys: "ctrl+c/y quit \u{b7} n stay".into(),
+            ..Dialog::default()
+        };
+        draw_dialog(f, frame, &d);
+        cursor = None;
+        bar = Bar::page("QUIT", &d.keys);
+    }
+    draw_status(f, app, bar_area, &bar);
+    if let Some(c) = cursor {
+        f.set_cursor_position(c);
+    }
+}
+
+/// The chat screen, as one frame: the sidebar's right side is the chat's left, and the chat's
+/// bottom edge is the input box's top. `over`: a box is open over it, so the input box doesn't
+/// take the keys, and its border is faint.
+fn draw_chat(f: &mut Frame, app: &App, frame: Rect, over: bool) -> (Bar, Option<(u16, u16)>) {
+    let boxed = frame.height + 1 >= BOXED_ROWS && frame.width >= BOXED_COLS;
     let sbw = if boxed && app.show_sidebar {
-        chat_left_width(area.width)
+        chat_left_width(frame.width)
     } else {
         0
     };
@@ -136,36 +207,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         ..col
     };
     draw_main(f, app, main, boxed, sbw > 0);
-    draw_input(f, app, input, main, boxed, sbw > 0);
-    draw_status(f, app, bar);
-    // A box opened from a page goes over the page.
-    if let Some(m) = &app.behind
-        && !matches!(app.modal, Some(Modal::Settings(_) | Modal::Browser(_)) | None)
-    {
-        draw_modal(f, app, m, area);
-    }
-    if let Some(m) = &app.modal {
-        draw_modal(f, app, m, area);
-    }
-    // A security key being waited for: what to do with it, over everything.
-    if let Some(w) = &app.key_wait {
-        use chat_core::net::seckey::Wait;
-        let stage = w.stage.load(std::sync::atomic::Ordering::Acquire);
-        let text = match (stage, &app.key_save) {
-            (Wait::LOOKING, None) => "Plug in your security key.".to_string(),
-            (Wait::LOOKING, Some(s)) => format!("Plug in the security key the save {s} was locked with."),
-            (Wait::TOUCH, None) => format!(
-                "Touch your security key now ({} of 2): it's blinking.",
-                w.touches.load(std::sync::atomic::Ordering::Acquire) + 1
-            ),
-            (Wait::TOUCH, Some(s)) => format!("Touch your security key now, to open {s}: it's blinking."),
-            _ => "Asking the security key...".into(),
-        };
-        draw_dialog(f, area, "SECURITY KEY", &[text], None, "esc cancel");
-    }
-    if app.asking_quit {
-        draw_dialog(f, area, "QUIT", &app.quit_paras(), None, "ctrl+c/y quit \u{b7} n stay");
-    }
+    let cursor = draw_input(f, app, input, main, boxed, sbw > 0, over);
+    let bar = Bar {
+        chip: app.mode.name().to_string(),
+        tone: tone(app),
+        hint: chat_hint(app),
+        anonymous: false,
+    };
+    (bar, (!over).then_some(cursor).flatten())
 }
 
 fn spinner(app: &App) -> char {
@@ -598,11 +647,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                         if v.unread > 99 { "+" } else { "" }
                     )
                 });
-                let (glyph, gs) = match &v.state {
-                    RoomState::Open(_) if v.net.ready => ("\u{25cf}", Style::default().fg(Color::Green)),
-                    RoomState::Open(_) => ("\u{25cc}", Style::default().fg(Color::Yellow)),
-                    _ => ("\u{25cb}", faint()),
-                };
+                let (glyph, gs) = state_mark(v);
                 let count = online.to_string();
                 let right = 2 + count.len() + badge.as_ref().map_or(0, |b| b.len() + 1);
                 let style = if on {
@@ -637,7 +682,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 
 /// The lines one entry takes, wrapped to the width.
 fn entry_lines(app: &App, r: &RoomView, e: &crate::app::Entry, w: usize) -> Vec<Line<'static>> {
-    let time = (hhmm(e.at) + " ", dim());
+    let time = (hhmm(e.at) + " ", faint());
     match &e.kind {
         EntryKind::Msg(m) => {
             let colour = m.colour.map_or(Color::Reset, rgb);
@@ -667,10 +712,10 @@ fn entry_lines(app: &App, r: &RoomView, e: &crate::app::Entry, w: usize) -> Vec<
                     name_style
                 },
             ));
-            pieces.push((": ".into(), dim()));
+            pieces.push((": ".into(), faint()));
             let (quote, body) = m.text.split_at(m.quote_len.min(m.text.len()));
             if !quote.is_empty() {
-                pieces.push((quote.to_string(), dim().add_modifier(Modifier::ITALIC)));
+                pieces.push((quote.to_string(), faint().add_modifier(Modifier::ITALIC)));
             }
             // Its links underlined.
             let mut at = 0;
@@ -692,21 +737,66 @@ fn entry_lines(app: &App, r: &RoomView, e: &crate::app::Entry, w: usize) -> Vec<
                 && let Some(t) = r.pictures.get(&num)
             {
                 lines.extend(picture_lines(t, w.saturating_sub(8), PICTURE_ROWS));
-                lines.push(Line::styled(format!("        /hide {num} hides it"), dim()));
+                lines.push(Line::styled(format!("        /hide {num} hides it"), faint()));
             }
             lines
         }
-        EntryKind::Note(Level::Warn, text) => wrap(
-            &[
-                time,
-                (format!("! {text}"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ],
+        EntryKind::Note(Level::Warn, text) => console_line(
+            app,
+            r,
+            time,
+            "! ",
+            text,
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             w,
-            8,
         ),
-        EntryKind::Note(Level::Note, text) => wrap(&[time, (format!("· {text}"), dim())], w, 8),
-        EntryKind::Log(text) => wrap(&[time, (format!("net: {text}"), dim().add_modifier(Modifier::ITALIC))], w, 8),
+        EntryKind::Note(Level::Note, text) => console_line(app, r, time, "\u{b7} ", text, faint(), w),
+        EntryKind::Log(text) => console_line(app, r, time, "net: ", text, faint().add_modifier(Modifier::ITALIC), w),
     }
+}
+
+/// A line of chat's own text, highlighted: its prose in `base`, and what chat-core marks in it
+/// brought out of the faint. Where it comes from is in the accent, and so are commands, as keys
+/// are; what went right is green, what's under way yellow and what went wrong red; addresses are
+/// blue, numbers and ids cyan, and a verify code, paths and invites in the terminal's own colour.
+/// The room, you and peers are named in bold, people in their colours. A line that starts with
+/// "warning:" is yellow.
+fn console_line(app: &App, r: &RoomView, time: (String, Style), lead: &str, text: &str, base: Style, w: usize) -> Vec<Line<'static>> {
+    use chat_core::protocol::text::{Mark, console_marks};
+    let names: Vec<&str> = [r.label.as_str(), app.nick.as_str()]
+        .into_iter()
+        .chain(r.peers.iter().map(|p| p.name.as_str()))
+        .collect();
+    let marks = console_marks(text, &names);
+    let base = match marks.first() {
+        Some((_, _, Mark::Warning)) => Style::default().fg(Color::Yellow),
+        _ => base,
+    };
+    let fg = |c: Color| Style::default().fg(c);
+    let mut pieces = vec![time, (lead.to_string(), base)];
+    let mut at = 0;
+    for (a, n, m) in marks {
+        let st = match m {
+            Mark::Source => accent(),
+            Mark::Command => accent_bold(),
+            Mark::Warning => fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Mark::Good => fg(Color::Green),
+            Mark::Busy => fg(Color::Yellow),
+            Mark::Bad => fg(Color::Red).add_modifier(Modifier::BOLD),
+            Mark::Address => fg(Color::Blue),
+            Mark::Number => fg(Color::Cyan),
+            Mark::Code | Mark::Invite => bold(),
+            Mark::Path => Style::default(),
+            Mark::Name(0) => bold(),
+            Mark::Name(1) => fg(app.colour.map_or(Color::Reset, rgb)).add_modifier(Modifier::BOLD),
+            Mark::Name(i) => fg(r.peers.get(i - 2).map_or(Color::Reset, |p| rgb(p.colour))).add_modifier(Modifier::BOLD),
+        };
+        pieces.push((text[at..a].to_string(), base));
+        pieces.push((text[a..a + n].to_string(), base.patch(st.remove_modifier(Modifier::DIM))));
+        at = a + n;
+    }
+    pieces.push((text[at..].to_string(), base));
+    wrap(&pieces, w, 8)
 }
 
 /// The most rows a picture takes in the messages.
@@ -715,7 +805,7 @@ const PICTURE_ROWS: usize = 20;
 /// After an offer: what can be done with it, or how it's going.
 fn file_hint(r: &RoomView, num: u32, mine: bool) -> (String, Style) {
     let Some(f) = r.file(num) else {
-        return (String::new(), dim());
+        return (String::new(), faint());
     };
     let text = match &f.state {
         _ if mine => match &f.sending {
@@ -732,7 +822,7 @@ fn file_hint(r: &RoomView, num: u32, mine: bool) -> (String, Style) {
         _ if f.image => format!(" · /show {num} to see it, /download {num} to save it"),
         _ => format!(" · /download {num} saves it"),
     };
-    (text, Style::default().fg(Color::Cyan))
+    (text, faint())
 }
 
 /// A picture in half-block characters: each cell is two pixels, the top in its colour and the
@@ -768,7 +858,9 @@ fn picture_lines(t: &chat_core::protocol::picture::Thumb, cols: usize, rows: usi
 
 /// What became of one of our messages: still going, everyone has it, held, or missed.
 fn delivery_mark(r: &RoomView, own: u64) -> (String, Style) {
-    let Some(s) = r.sent.get(&own) else { return (" ·".into(), dim()) };
+    let Some(s) = r.sent.get(&own) else {
+        return (" ·".into(), faint());
+    };
     if !s.missed.is_empty() {
         return (
             format!(" ✗ not delivered to {}", s.missed.join(", ")),
@@ -779,171 +871,210 @@ fn delivery_mark(r: &RoomView, own: u64) -> (String, Style) {
         return (" ⏸ held until you compare codes".into(), Style::default().fg(Color::Yellow));
     }
     if s.to == 0 {
-        return (" · nobody else here".into(), dim());
+        return (" · nobody else here".into(), faint());
     }
     if s.settled {
         return (" ✓".into(), Style::default().fg(Color::Green));
     }
     if s.delivered > 0 {
-        return (" ✓".into(), dim());
+        return (" ✓".into(), faint());
     }
-    (" ·".into(), dim())
+    (" ·".into(), faint())
 }
 
-fn welcome(app: &App) -> Vec<Line<'static>> {
-    let key = |k: &str| Span::styled(k.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
-    vec![
-        Line::raw(""),
-        Line::styled("  chat", Style::default().add_modifier(Modifier::BOLD)),
-        Line::styled("  end-to-end encrypted rooms, with no server and no accounts", dim()),
-        Line::raw(""),
-        Line::from(vec![
-            Span::raw("  "),
-            key("Ctrl+N"),
-            Span::raw("  start a new room, and share its invite"),
-        ]),
-        Line::from(vec![Span::raw("  "), key("Ctrl+J"), Span::raw("  join a room with an invite")]),
-        Line::from(vec![Span::raw("  "), key("F1    "), Span::raw("  every key and command")]),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("  rooms go ", dim()),
-            Span::styled(
-                match app.base.route.mode {
-                    RouteMode::Tor => "through Tor: nobody learns your IP address, peers included",
-                    RouteMode::Direct => "direct: faster, but peers see your IP address",
-                },
-                Style::default(),
-            ),
-        ]),
-        Line::styled(
-            match app.base.route.mode {
-                RouteMode::Tor => "  /route direct is faster, but shows your IP address to peers",
-                RouteMode::Direct => "  /route tor hides your IP address, and takes a minute or two to connect",
-            },
-            dim(),
-        ),
-        Line::styled("  the Nostr relays (on unless /relays off) find members faster", dim()),
-    ]
+/// Where `n` rows start to sit a little above the middle of `nrows` rows from `first`.
+fn center_top(first: u16, nrows: usize, n: usize) -> u16 {
+    first + (nrows.saturating_sub(n) / 2).saturating_sub(nrows / 10) as u16
 }
 
-fn centered(area: Rect, w: u16, h: u16) -> Rect {
-    let w = w.min(area.width.saturating_sub(2));
-    let h = h.min(area.height.saturating_sub(2));
-    Rect {
-        x: area.x + (area.width - w) / 2,
-        y: area.y + (area.height - h) / 2,
-        width: w,
-        height: h,
+/// Lines centred across `w` columns from `x`, a little above the middle of `nrows` rows: the first
+/// bold and the rest faint, except a line that's just `emph` (the room's id, to share), highlighted.
+fn draw_center(buf: &mut Buffer, x: u16, top: u16, w: u16, nrows: usize, text: &str, emph: Option<&str>) {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let first = center_top(top, nrows, lines.len());
+    for (i, l) in lines.iter().enumerate() {
+        let y = first + i as u16;
+        if y >= top + nrows as u16 {
+            break;
+        }
+        let style = if i == 0 {
+            bold()
+        } else if emph == Some(*l) {
+            accent_bold()
+        } else {
+            faint()
+        };
+        let l = ell(l, w as usize);
+        let pad = (w as usize).saturating_sub(width(&l)) / 2;
+        buf.set_line(x + pad as u16, y, &Line::styled(l, style), w);
     }
 }
 
-fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
-    let key = |k: &str| Span::styled(k.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+/// No room yet: what chat is, and the keys that start one.
+fn draw_welcome(buf: &mut Buffer, x: u16, top: u16, w: u16, nrows: usize) {
+    const KEYS: [(&str, &str); 4] = [
+        ("ctrl+n", "start a new session"),
+        ("ctrl+j", "join a session"),
+        ("ctrl+s", "settings"),
+        ("/help", "keys and commands"),
+    ];
+    // The keys in a column, and what they do in one about as wide as the longest.
+    const KEY_COLS: usize = 9;
+    const DOES_COLS: usize = 20;
+    let first = center_top(top, nrows, 2 + KEYS.len());
+    let end = top + nrows as u16;
+    let brand = "\u{25c6} chat";
+    if first < end {
+        let pad = (w as usize).saturating_sub(width(brand)) / 2;
+        buf.set_line(x + pad as u16, first, &Line::styled(brand, accent_bold()), w);
+    }
+    let left = (w as usize).saturating_sub(KEY_COLS + DOES_COLS) / 2;
+    for (i, (key, does)) in KEYS.iter().enumerate() {
+        let y = first + 2 + i as u16;
+        if y >= end {
+            break;
+        }
+        let spans = vec![
+            Span::raw(" ".repeat(left)),
+            Span::styled(format!("{key:KEY_COLS$}"), accent_bold()),
+            Span::raw(*does),
+        ];
+        buf.set_line(x, y, &Line::from(spans), w);
+    }
+}
+
+/// What the chat shows while a room has no messages: how it's getting on, and what to do next.
+fn empty_text(r: &RoomView) -> Option<String> {
+    let RoomState::Open(_) = &r.state else {
+        return matches!(r.state, RoomState::Joining).then(|| "Starting the session\nDeriving its keys - this takes a moment.".to_string());
+    };
+    Some(if !r.net.ready {
+        format!(
+            "Connecting to {}\nThe chat opens once someone in the session answers.\nFinding them can take a minute{}.",
+            r.label,
+            if r.net.mode == RouteMode::Tor { " over Tor" } else { "" }
+        )
+    } else if r.peers.is_empty() {
+        format!(
+            "No one else is here yet\nTo invite peers, share the session id and its password.\n\n{}\n/invite copies both, as one invite",
+            r.label
+        )
+    } else {
+        "No messages yet\nSay hello - it's end-to-end encrypted.".into()
+    })
+}
+
+/// A page and anything that goes over it, and what the bar says there.
+fn draw_page_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) -> (Bar, Option<(u16, u16)>) {
+    let full = f.area();
     match m {
-        Modal::Prompt { kind, title, hint, input } => {
-            let w = 72.min(area.width.saturating_sub(2));
-            let mut lines = wrap(&[(hint.clone(), dim())], w.saturating_sub(2) as usize, 0);
-            let hint_rows = lines.len() as u16;
-            let r = centered(area, w, hint_rows + 6);
-            f.render_widget(Clear, r);
-            let text = input.text();
-            // An invite holds the password.
-            let shown = if kind.secret() || matches!(kind, PromptKind::JoinId) && chat_core::protocol::names::is_invite(&text) {
-                "\u{2022}".repeat(text.chars().count())
-            } else {
-                text
-            };
-            // An empty field says what it takes.
-            let placeholder = match kind {
-                PromptKind::SetRow(name) if shown.is_empty() => chat_core::net::settings::PAGE
-                    .iter()
-                    .find(|r| r.name == *name)
-                    .map_or("", |r| r.values),
-                PromptKind::KeyPath(chat_core::IdentityKind::Pgp) if shown.is_empty() => "~/key.asc",
-                PromptKind::KeyPath(_) if shown.is_empty() => "~/.config/age/key.txt",
-                _ => "",
-            };
-            lines.extend([
-                Line::raw(""),
-                Line::from(vec![
-                    Span::styled("› ", dim()),
-                    Span::raw(shown.clone()),
-                    Span::styled(placeholder, dim()),
-                ]),
-                Line::raw(""),
-                Line::from(vec![
-                    key("Enter"),
-                    Span::styled(" ok   ", dim()),
-                    key("Esc"),
-                    Span::styled(" cancel", dim()),
-                ]),
-            ]);
-            f.render_widget(Paragraph::new(lines).block(block(title.clone())), r);
-            if !app.asking_quit {
-                f.set_cursor_position((r.x + 3 + width(&shown) as u16, r.y + 2 + hint_rows));
+        Modal::Settings(p) => {
+            let v = if p.pick.is_some() { app.pick_view(p) } else { app.settings_view(p) };
+            let bar = draw_page(f, &v, area);
+            match &p.search {
+                Some((input, sel)) => {
+                    let d = search_dialog(app, input, *sel);
+                    let cursor = draw_dialog(f, area, &d);
+                    (Bar::page(&bar.chip, &d.keys), cursor)
+                }
+                None => (bar, None),
             }
         }
+        Modal::Browser(b) => {
+            let bar = draw_page(f, &app.browser_view(b, full.width, full.height), area);
+            match &b.ask {
+                Some(path) => {
+                    let d = export_dialog(app, path);
+                    draw_dialog(f, area, &d);
+                    (Bar::page("EXPORT", &d.keys), None)
+                }
+                None => (bar, None),
+            }
+        }
+        Modal::Files(num) => (draw_page(f, &app.files_view(*num), area), None),
+        Modal::Picture(num) => (draw_picture(f, app, *num, area), None),
+        Modal::Help(sel) => (draw_page(f, &app.help_view(*sel), area), None),
+        _ => (Bar::page("", ""), None),
+    }
+}
+
+/// A box as it's drawn, and the bar's chip while it's open over the chat.
+fn modal_dialog(app: &App, m: &Modal) -> (Dialog, &'static str) {
+    match m {
+        Modal::Prompt { kind, title, hint, input } => prompt_dialog(app, kind, title, hint, input),
         Modal::Verify { peer, .. } => {
-            let r = centered(area, 72, 13);
-            f.render_widget(Clear, r);
             let code = peer.code.clone().unwrap_or(chat_core::VerifyCode {
                 words: "-".into(),
                 hex: "-".into(),
             });
+            let mut text = paras(&[format!(
+                "Compare this code with {} over another channel you trust (in person, a call):",
+                peer.name
+            )]);
+            text.push(Para::Blank);
             // Two groups of four words a line, as they're read out.
             let groups: Vec<&str> = code.words.split(" \u{b7} ").collect();
-            let bold = Style::default().add_modifier(Modifier::BOLD);
-            let mut lines = vec![
-                Line::raw(format!(
-                    "Compare this code with {} over another channel you trust (in person, a call):",
-                    peer.name
-                )),
-                Line::raw(""),
-            ];
             for pair in groups.chunks(2) {
-                lines.push(Line::styled(format!("    {}", pair.join("   ")), bold));
+                text.push(Para::Text(vec![(format!("  {}", pair.join("   ")), bold())]));
             }
-            lines.extend([
-                Line::styled(format!("    {}", code.hex), dim()),
-                Line::raw(""),
-                Line::styled("If anyone sat between you, the codes on your two screens would differ.", dim()),
-                Line::raw(""),
-                Line::from(vec![
-                    key("y"),
-                    Span::raw(" they match   "),
-                    key("n"),
-                    Span::raw(" they differ   "),
-                    key("Esc"),
-                    Span::styled(" later", dim()),
-                ]),
-            ]);
-            f.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .block(block(format!(" Verify {} ", peer.name))),
-                r,
-            );
+            text.push(Para::Text(vec![(format!("  {}", code.hex), faint())]));
+            text.push(Para::Blank);
+            text.push(Para::Text(vec![(
+                "If anyone sat between you, the codes on your two screens would differ.".into(),
+                Style::default(),
+            )]));
+            let d = Dialog {
+                title: "VERIFY".into(),
+                text,
+                keys: "y they match \u{b7} n they differ \u{b7} esc later".into(),
+                ..Dialog::default()
+            };
+            (d, "VERIFY")
         }
-        Modal::Settings(page) => draw_settings(f, app, page, area),
-        Modal::Ask { title, paras, keys, .. } => draw_dialog(f, area, title, paras, None, keys),
+        Modal::Ask { title, paras: p, keys, .. } => {
+            let d = Dialog {
+                title: (*title).into(),
+                text: paras(p),
+                keys: (*keys).into(),
+                ..Dialog::default()
+            };
+            // A box that asks is about what its title says first: MOVE, INSTALL...
+            let title: &'static str = title;
+            (d, title.split(" \u{b7} ").next().unwrap_or(title))
+        }
         Modal::Paste { kind, text } => {
-            let (title, paras) = crate::settings_page::paste_box(*kind);
+            let (title, p) = crate::settings_page::paste_box(*kind);
             let status = if text.is_empty() {
                 "waiting for the paste".to_string()
             } else {
                 format!("{} bytes so far", text.len())
             };
-            draw_dialog(f, area, title, &paras.map(String::from), Some(&status), "esc back");
+            let d = Dialog {
+                title: title.into(),
+                text: paras(&p.map(String::from)),
+                status: Some(status),
+                keys: "esc back".into(),
+                ..Dialog::default()
+            };
+            (d, "SETTINGS")
         }
-        Modal::Browser(b) => {
-            draw_page(f, app, &app.browser_view(b, area.width, area.height), area);
-            if let Some(path) = &b.ask {
-                draw_export_ask(f, app, path, area);
-            }
+        Modal::Rooms { sel, forgetting } => (rooms_dialog(app, *sel, *forgetting), "JOIN"),
+        Modal::PickSave { names, sel } => {
+            let (esc, skip) = if app.start.is_some() {
+                ("Esc starts without any", "esc skip")
+            } else {
+                ("Esc cancels", "esc cancel")
+            };
+            let d = Dialog {
+                title: "UNLOCK".into(),
+                text: paras(&[format!("Your saves. Enter opens one; {esc}.")]),
+                items: names.iter().map(|n| (n.clone(), String::new())).collect(),
+                sel: Some(*sel),
+                keys: format!("enter open \u{b7} {skip}"),
+                ..Dialog::default()
+            };
+            (d, "UNLOCK")
         }
-        Modal::Files(num) => draw_page(f, app, &app.files_view(*num), area),
-        Modal::Picture(num) => draw_picture(f, app, *num, area),
-        Modal::Rooms { sel, forgetting } => draw_rooms(f, app, *sel, *forgetting, area),
         Modal::Link { links, at } => {
             let (link, who, when) = &links[*at];
             let target = chat_core::protocol::text::link_target(link);
@@ -952,18 +1083,33 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
             } else {
                 format!("from {who} at {when}")
             };
-            let lines = vec![
-                Line::raw(format!(" {target}")),
-                Line::styled(format!(" {from} \u{b7} {} of {}", at + 1, links.len()), dim()),
-                Line::raw(""),
-                Line::raw(" Your browser fetches it directly, not through chat's Tor or relays: the site sees"),
-                Line::raw(" your IP address, and when you opened it."),
-                Line::raw(""),
-                Line::styled(" y open \u{b7} c copy \u{b7} j/k older/newer \u{b7} n or Esc close", dim()),
-            ];
-            let r = centered(area, 86, 9);
-            f.render_widget(Clear, r);
-            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block(" Open a link ")), r);
+            let more = links.len() > 1;
+            let d = Dialog {
+                title: if more {
+                    format!("OPEN LINK \u{b7} {} OF {}", at + 1, links.len())
+                } else {
+                    "OPEN LINK".into()
+                },
+                text: vec![
+                    Para::Text(vec![(target, Style::default())]),
+                    Para::Text(vec![(from, faint())]),
+                    Para::Blank,
+                    Para::Text(vec![(
+                        "Your browser fetches it directly, not through chat's Tor or relays: the site sees your IP \
+                         address, and when you opened it."
+                            .into(),
+                        Style::default(),
+                    )]),
+                ],
+                keys: if more {
+                    "y open \u{b7} c copy \u{b7} j/k older/newer \u{b7} n cancel"
+                } else {
+                    "y open \u{b7} c copy \u{b7} n cancel"
+                }
+                .into(),
+                ..Dialog::default()
+            };
+            (d, "LINK")
         }
         Modal::Qr { invite, qr, note } => {
             // Two modules a cell, top and bottom, with the light border a scanner needs.
@@ -973,7 +1119,7 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 (QUIET..QUIET + qr.size).contains(&x) && (QUIET..QUIET + qr.size).contains(&y) && qr.dark(x - QUIET, y - QUIET)
             };
             let colour = |d: bool| if d { Color::Black } else { Color::White };
-            let mut lines: Vec<Line> = (0..side.div_ceil(2))
+            let mut text: Vec<Para> = (0..side.div_ceil(2))
                 .map(|row| {
                     let spans: Vec<Span> = (0..side)
                         .map(|x| {
@@ -981,32 +1127,116 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                             Span::styled("\u{2580}", Style::default().fg(colour(dark(x, 2 * row))).bg(colour(bottom)))
                         })
                         .collect();
-                    Line::from(spans).centered()
+                    Para::Art(Line::from(spans))
                 })
                 .collect();
-            lines.push(Line::raw(""));
-            lines.push(Line::raw(invite.clone()).centered());
-            lines.push(Line::styled(note.clone(), dim()).centered());
-            let w = (side.max(invite.len()) + 4).min(area.width as usize) as u16;
-            let r = centered(area, w, (lines.len() as u16 + 2).min(area.height));
-            f.render_widget(Clear, r);
-            f.render_widget(Paragraph::new(lines).block(block(" Invite ")), r);
+            text.push(Para::Blank);
+            text.push(Para::Text(vec![(invite.clone(), Style::default())]));
+            let d = Dialog {
+                title: "INVITE".into(),
+                text,
+                note: Some(note.clone()),
+                keys: "esc close".into(),
+                ..Dialog::default()
+            };
+            (d, "INVITE")
         }
         Modal::Info { title, lines } => {
-            let w = area.width.saturating_sub(4).min(90);
-            let mut body: Vec<Line> = Vec::new();
-            for l in lines {
-                body.extend(wrap(&[(l.clone(), Style::default())], w.saturating_sub(4) as usize, 0));
-            }
-            body.push(Line::raw(""));
-            body.push(Line::styled(" Any key closes this.", dim()));
-            let r = centered(area, w, (body.len() as u16 + 2).min(area.height));
-            f.render_widget(Clear, r);
-            f.render_widget(Paragraph::new(body).block(block(title.clone())), r);
+            let d = Dialog {
+                title: title.trim().to_uppercase(),
+                text: lines.iter().map(|l| Para::Text(vec![(l.clone(), Style::default())])).collect(),
+                keys: "esc close".into(),
+                ..Dialog::default()
+            };
+            (d, "INFO")
         }
-        Modal::Help(sel) => draw_page(f, app, &app.help_view(*sel), area),
-        Modal::Update => draw_update(f, area),
+        Modal::Update => {
+            let running = chat_core::net::update::view().running;
+            let d = Dialog {
+                keys: if running { "esc hide" } else { "enter close" }.into(),
+                ..Dialog::default()
+            };
+            (d, "UPDATE")
+        }
+        Modal::Settings(_) | Modal::Browser(_) | Modal::Files(_) | Modal::Picture(_) | Modal::Help(_) => (Dialog::default(), ""),
     }
+}
+
+/// A field's box. Its help goes under the field when it's a line about what to type (a room's id,
+/// a setting), and above it when it's more to read first.
+fn prompt_dialog(app: &App, kind: &PromptKind, title: &str, hint: &str, input: &Input) -> (Dialog, &'static str) {
+    use crate::saved::Installing;
+    let text = input.text();
+    // An invite holds the password.
+    let mask = kind.secret() || matches!(kind, PromptKind::JoinId) && chat_core::protocol::names::is_invite(&text);
+    let pgp = |k: &chat_core::IdentityKind| *k == chat_core::IdentityKind::Pgp;
+    let skip = if app.start.is_some() { "esc skip" } else { "esc cancel" };
+    let (placeholder, keys, chip): (String, String, &'static str) = match kind {
+        PromptKind::Nick => ("your name".into(), "enter save \u{b7} esc cancel".into(), "NICK"),
+        PromptKind::NewRoom => ("password".into(), "enter create \u{b7} esc cancel".into(), "NEW"),
+        PromptKind::JoinId => ("session id, or an invite".into(), "enter next \u{b7} esc cancel".into(), "JOIN"),
+        PromptKind::JoinPassword(_) => ("password".into(), "enter join \u{b7} esc cancel".into(), "JOIN"),
+        PromptKind::Unlock(_) => ("passphrase".into(), format!("enter open \u{b7} {skip}"), "UNLOCK"),
+        PromptKind::Code => ("6-digit code".into(), format!("enter open \u{b7} {skip}"), "UNLOCK"),
+        PromptKind::KeyPin(Some(_)) => ("PIN".into(), "enter send \u{b7} esc cancel".into(), "UNLOCK"),
+        PromptKind::KeyPin(None) => ("PIN".into(), "enter send \u{b7} esc cancel".into(), "SETTINGS"),
+        PromptKind::Install(Installing::Name) => (String::new(), "enter next \u{b7} esc cancel".into(), "INSTALL"),
+        PromptKind::Install(Installing::Pass(_)) => ("passphrase".into(), "enter next \u{b7} esc cancel".into(), "INSTALL"),
+        PromptKind::Install(Installing::Again(..)) => ("the same passphrase".into(), "enter install \u{b7} esc cancel".into(), "INSTALL"),
+        PromptKind::Uninstall(_) => ("yes".into(), "enter delete \u{b7} esc cancel".into(), "UNINSTALL"),
+        PromptKind::SetPin => ("PIN".into(), "enter lock \u{b7} esc cancel".into(), "LOCK"),
+        PromptKind::Shadow(None) => ("shadow passphrase".into(), "enter next \u{b7} esc cancel".into(), "SETTINGS"),
+        PromptKind::Shadow(Some(_)) => ("the same passphrase".into(), "enter set \u{b7} esc cancel".into(), "SETTINGS"),
+        PromptKind::NewCode => ("6-digit code".into(), "enter turn on \u{b7} esc cancel".into(), "SETTINGS"),
+        PromptKind::SetRow(name) => (
+            chat_core::net::settings::PAGE
+                .iter()
+                .find(|r| r.name == *name)
+                .map_or("", |r| r.values)
+                .into(),
+            "enter save \u{b7} esc cancel".into(),
+            "SETTINGS",
+        ),
+        PromptKind::KeyPath(k) => (
+            if pgp(k) { "~/key.asc" } else { "~/.config/age/key.txt" }.into(),
+            "enter use this key \u{b7} esc back".into(),
+            "SETTINGS",
+        ),
+        PromptKind::KeyPassword { .. } => ("password".into(), "enter make the key \u{b7} esc back".into(), "SETTINGS"),
+    };
+    let below = matches!(
+        kind,
+        PromptKind::NewRoom | PromptKind::JoinId | PromptKind::JoinPassword(_) | PromptKind::SetRow(_)
+    );
+    let d = Dialog {
+        title: title.trim().to_uppercase(),
+        text: if below || hint.is_empty() {
+            Vec::new()
+        } else {
+            paras(&[hint.to_string()])
+        },
+        field: Some(Field::of(input, mask, placeholder)),
+        note: below.then(|| hint.to_string()).filter(|h| !h.is_empty()),
+        keys,
+        ..Dialog::default()
+    };
+    (d, chip)
+}
+
+/// The lock screen's box: the passphrase or PIN, as dots, or that it's being checked.
+fn lock_dialog(app: &App, lock: &crate::lock::Lock) -> Dialog {
+    let pass = app.save.is_some() || lock.busy && app.pin.is_none();
+    let mut d = Dialog {
+        title: "LOCKED".into(),
+        keys: "enter unlock".into(),
+        ..Dialog::default()
+    };
+    if lock.busy {
+        d.status = Some("checking\u{2026}".into());
+    } else {
+        d.field = Some(Field::of(&lock.input, true, if pass { "passphrase" } else { "PIN" }.into()));
+    }
+    d
 }
 
 // ---- the chat screen: the console over the chat, the input box, and the bottom row ----
@@ -1102,16 +1332,14 @@ fn draw_rows_linked(
 /// The console has the notes; the chat has the messages, and the warnings too, since the console
 /// can be hidden.
 fn draw_main(f: &mut Frame, app: &App, m: Rect, boxed: bool, joined: bool) {
-    let Some(r) = app.room() else {
-        f.render_widget(Paragraph::new(welcome(app)).block(block(" chat ")).wrap(Wrap { trim: false }), m);
-        return;
-    };
+    let r = app.room();
     let w = (m.width as usize).saturating_sub(4);
     let (mut console, mut chat) = (Vec::new(), Vec::new());
     let mut chat_links: Vec<Vec<(usize, String)>> = Vec::new();
     app.links.borrow_mut().clear();
-    let start = r.entries.len().saturating_sub(400);
-    for e in &r.entries[start..] {
+    let entries = r.map_or(&[][..], |r| &r.entries[r.entries.len().saturating_sub(400)..]);
+    for e in entries {
+        let r = r.expect("entries come from a room");
         match &e.kind {
             EntryKind::Msg(m) => {
                 let lines = entry_lines(app, r, e, w);
@@ -1140,19 +1368,42 @@ fn draw_main(f: &mut Frame, app: &App, m: Rect, boxed: bool, joined: bool) {
             _ => console.extend(entry_lines(app, r, e, w)),
         }
     }
-    let (mut show_con, show_chat) = (app.show_console, app.show_chat);
+    // Without a room there's no console: the welcome fills the box.
+    let (mut show_con, show_chat) = (app.show_console && r.is_some(), app.show_chat || r.is_none());
+    let (scroll, console_scroll) = r.map_or((0, 0), |r| (r.scroll, r.console_scroll));
+    // The chat pane: the welcome, how a room with no messages yet is getting on, or the messages.
+    let pane = |buf: &mut Buffer, x: u16, top: u16, iw: u16, rows: usize| match r {
+        None => draw_welcome(buf, x + 1, top, iw.saturating_sub(2), rows),
+        Some(r) if chat.is_empty() => {
+            if let Some(t) = empty_text(r) {
+                draw_center(buf, x + 1, top, iw.saturating_sub(2), rows, &t, Some(&r.label));
+            }
+        }
+        Some(_) => {
+            let skip = scroll.min(chat.len().saturating_sub(rows));
+            draw_rows_linked(buf, x, top, iw, rows, &chat, skip, &chat_links, Some(&app.links));
+        }
+    };
+    let hidden = |buf: &mut Buffer, x: u16, top: u16, iw: u16, rows: usize| {
+        draw_center(
+            buf,
+            x + 1,
+            top,
+            iw.saturating_sub(2),
+            rows,
+            "Chat and console are hidden\nctrl+t shows the chat \u{b7} ctrl+o the console",
+            None,
+        );
+    };
     let buf = f.buffer_mut();
     if !boxed {
-        let lines = if show_chat { &chat } else { &console };
-        draw_rows(
-            buf,
-            m.x,
-            m.y,
-            m.width,
-            m.height as usize,
-            lines,
-            if show_chat { r.scroll } else { r.console_scroll },
-        );
+        if show_chat {
+            pane(buf, m.x, m.y, m.width, m.height as usize);
+        } else if show_con {
+            draw_rows(buf, m.x, m.y, m.width, m.height as usize, &console, console_scroll);
+        } else {
+            hidden(buf, m.x, m.y, m.width, m.height as usize);
+        }
         return;
     }
     let inner = (m.height as usize).saturating_sub(2);
@@ -1167,23 +1418,10 @@ fn draw_main(f: &mut Frame, app: &App, m: Rect, boxed: bool, joined: bool) {
     let con_rows = if show_chat { con_h } else { inner };
     app.console_at
         .set(show_con.then(|| Rect::new(m.x, m.y, m.width, con_rows as u16 + 1)));
-    let kskip = r.console_scroll.min(console.len().saturating_sub(con_rows));
+    let kskip = console_scroll.min(console.len().saturating_sub(con_rows));
     let bs = faint();
     let clock = vec![Span::styled(hhmm(crate::text::unix_now()), faint())];
-    let mut title = vec![
-        Span::styled(r.label.clone(), bold()),
-        Span::styled(format!(" \u{b7} {}", r.status_line(spinner(app))), faint()),
-    ];
-    if r.timer > 0 {
-        title.push(Span::styled(
-            format!(" \u{b7} messages go after {}", chat_core::protocol::names::format_timer(r.timer)),
-            faint(),
-        ));
-    }
-    let room = title_room(m.width as usize, spans_width(&clock));
-    if spans_width(&title) > room {
-        title = vec![Span::styled(ell(&r.label, room), bold())];
-    }
+    let title = chat_title(app, m.width as usize, spans_width(&clock), joined);
     let corner = if joined { "\u{252c}" } else { "\u{256d}" };
     if show_con {
         let mut ktitle = vec![Span::styled("console", faint())];
@@ -1208,8 +1446,8 @@ fn draw_main(f: &mut Frame, app: &App, m: Rect, boxed: bool, joined: bool) {
         );
     }
     for y in m.y + 1..m.y + m.height.saturating_sub(1) {
-        buf.set_string(m.x, y, "\u{2502}", bs);
-        buf.set_string(m.x + m.width - 1, y, "\u{2502}", bs);
+        box_side(buf, m.x, y, bs);
+        box_side(buf, m.x + m.width - 1, y, bs);
     }
     let mut row = m.y + 1;
     let iw = m.width.saturating_sub(2);
@@ -1223,23 +1461,60 @@ fn draw_main(f: &mut Frame, app: &App, m: Rect, boxed: bool, joined: bool) {
     }
     let rest = (m.y + m.height.saturating_sub(1)).saturating_sub(row) as usize;
     if show_chat {
-        let skip = r.scroll.min(chat.len().saturating_sub(rest));
-        draw_rows_linked(buf, m.x + 1, row, iw, rest, &chat, skip, &chat_links, Some(&app.links));
+        pane(buf, m.x + 1, row, iw, rest);
     } else if !show_con {
-        let lines = [
-            Line::styled("Chat and console are hidden", bold()),
-            Line::from(vec![
-                Span::styled("ctrl+t", accent()),
-                Span::styled(" shows the chat \u{b7} ", faint()),
-                Span::styled("ctrl+o", accent()),
-                Span::styled(" the console", faint()),
-            ]),
-        ];
-        let top = row + (rest as u16).saturating_sub(2) / 2;
-        for (i, l) in lines.into_iter().enumerate() {
-            let lw = spans_width(&l.spans) as u16;
-            buf.set_line(m.x + 1 + iw.saturating_sub(lw) / 2, top + i as u16, &l, iw);
-        }
+        hidden(buf, m.x + 1, row, iw, rest);
+    }
+}
+
+/// The chat's title: the room's state and name, unread messages in other rooms while the sidebar is
+/// hidden, and how it's getting on; or "welcome" with no room. Cut to the name when it doesn't fit.
+fn chat_title(app: &App, w: usize, right: usize, sidebar: bool) -> Vec<Span<'static>> {
+    let Some(r) = app.room() else {
+        return vec![Span::styled("welcome", bold())];
+    };
+    let (glyph, gs) = state_mark(r);
+    let mut title = vec![Span::styled(glyph, gs), Span::raw(" "), Span::styled(r.label.clone(), bold())];
+    let elsewhere: usize = app
+        .rooms
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != app.current)
+        .map(|(_, v)| v.unread)
+        .sum();
+    if !sidebar && elsewhere > 0 {
+        let mentioned = app.rooms.iter().enumerate().any(|(i, v)| i != app.current && v.mentioned);
+        title.push(Span::styled(" \u{b7} ", faint()));
+        title.push(Span::styled(
+            format!("{}{elsewhere} new elsewhere", if mentioned { "@" } else { "" }),
+            if mentioned {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                accent_bold()
+            },
+        ));
+    }
+    title.push(Span::styled(format!(" \u{b7} {}", r.status_line(spinner(app))), faint()));
+    if r.timer > 0 {
+        title.push(Span::styled(
+            format!(" \u{b7} messages go after {}", chat_core::protocol::names::format_timer(r.timer)),
+            faint(),
+        ));
+    }
+    let room = title_room(w, right);
+    if spans_width(&title) > room {
+        title = vec![Span::styled(ell(&r.label, room), bold())];
+    }
+    title
+}
+
+/// A room's state: a ring while it starts (or once it's gone), dotted while it connects, a dot once
+/// it's live.
+fn state_mark(r: &RoomView) -> (&'static str, Style) {
+    match &r.state {
+        RoomState::Open(_) if r.net.ready => ("\u{25cf}", Style::default().fg(Color::Green)),
+        RoomState::Open(_) => ("\u{25cc}", Style::default().fg(Color::Yellow)),
+        _ => ("\u{25cb}", faint()),
     }
 }
 
@@ -1296,8 +1571,8 @@ fn draw_menu(buf: &mut Buffer, app: &App, input: Rect, over: Rect, bs: Style) {
         let y = top + 1 + i as u16;
         buf.set_style(Rect::new(input.x + 1, y, iw, 1), Style::reset());
         buf.set_string(input.x + 1, y, " ".repeat(iw as usize), Style::default());
-        buf.set_string(input.x, y, "\u{2502}", bs);
-        buf.set_string(input.x + input.width - 1, y, "\u{2502}", bs);
+        box_side(buf, input.x, y, bs);
+        box_side(buf, input.x + input.width - 1, y, bs);
         let s = &list[first + i];
         let on = first + i == sel;
         let mut spans = vec![pointer(on), Span::styled(s.name.clone(), if on { accent_bold() } else { bold() })];
@@ -1318,10 +1593,12 @@ fn draw_menu(buf: &mut Buffer, app: &App, input: Rect, over: Rect, bs: Style) {
 }
 
 /// The input box: the line in the mode's colour, or the command line with the menu over it. Its
-/// top edge is the chat's bottom, and says how many newer messages are below the chat.
-fn draw_input(f: &mut Frame, app: &App, r: Rect, over: Rect, boxed: bool, joined: bool) {
+/// top edge is the chat's bottom, and says how many newer messages are below the chat. Under a box
+/// its border is faint, since the box takes the keys. Returns where the cursor goes.
+#[allow(clippy::too_many_arguments)]
+fn draw_input(f: &mut Frame, app: &App, r: Rect, over: Rect, boxed: bool, joined: bool, covered: bool) -> Option<(u16, u16)> {
     let tone = tone(app);
-    let bs = Style::default().fg(tone);
+    let bs = if covered { faint() } else { Style::default().fg(tone) };
     let command = app.mode == crate::cmdline::Mode::Command;
     let buf = f.buffer_mut();
     let (row, left, iw) = if boxed {
@@ -1335,8 +1612,8 @@ fn draw_input(f: &mut Frame, app: &App, r: Rect, over: Rect, boxed: bool, joined
             Vec::new()
         };
         edge(buf, r.x, r.y, r.width, ["\u{251c}", "\u{2524}"], bs, Vec::new(), more);
-        buf.set_string(r.x, r.y + 1, "\u{2502}", bs);
-        buf.set_string(r.x + r.width - 1, r.y + 1, "\u{2502}", bs);
+        box_side(buf, r.x, r.y + 1, bs);
+        box_side(buf, r.x + r.width - 1, r.y + 1, bs);
         let len = app.input.chars.len();
         let max = chat_core::protocol::session::MAX_TEXT;
         let count = if len > 0 && !command {
@@ -1411,56 +1688,13 @@ fn draw_input(f: &mut Frame, app: &App, r: Rect, over: Rect, boxed: bool, joined
         }
     }
     inner_line(buf, left, row, iw, spans);
-    if app.modal.is_none() && !app.asking_quit {
-        f.set_cursor_position((left + 1 + (cursor_col as u16).min(iw.saturating_sub(2)), row));
-    }
+    Some((left + 1 + (cursor_col as u16).min(iw.saturating_sub(2)), row))
 }
 
-/// The bottom row: the mode's chip, whether you sign and as what, your nick, the last message,
-/// and as many of the hints as fit, the last (the way out, or to the help) always.
-fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+/// What the keys do on the chat screen, most useful first: the last is the way to the help.
+fn chat_hint(app: &App) -> String {
     use crate::cmdline::Mode;
-    let mut spans = vec![
-        Span::styled(
-            format!(" {} ", app.mode.name()),
-            Style::default().fg(tone(app)).add_modifier(Modifier::BOLD | Modifier::REVERSED),
-        ),
-        Span::raw(" "),
-    ];
-    match &app.ident {
-        None => spans.push(Span::styled("\u{25cb} unsigned", Style::default().fg(Color::Yellow))),
-        Some(i) => {
-            spans.push(Span::styled("\u{2713} signed ", Style::default().fg(Color::Green)));
-            spans.push(Span::styled(
-                match i.kind {
-                    chat_core::IdentityKind::Age => "age",
-                    chat_core::IdentityKind::Pgp => "pgp",
-                    chat_core::IdentityKind::Native => "native",
-                },
-                faint(),
-            ));
-        }
-    }
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-        app.nick.clone(),
-        Style::default()
-            .fg(app.colour.map_or(Color::Reset, rgb))
-            .add_modifier(Modifier::BOLD),
-    ));
-    if let Some((text, bad, _)) = &app.status {
-        spans.push(Span::styled("  \u{203a} ", faint()));
-        spans.push(Span::styled(
-            text.clone(),
-            if *bad {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-            } else {
-                bold()
-            },
-        ));
-    }
-    let room = app.room().filter(|r| r.room().is_some());
-    let hint = match (app.mode, room) {
+    match (app.mode, app.room().filter(|r| r.room().is_some())) {
         (Mode::Command, _) => "enter run \u{b7} tab complete \u{b7} \u{2191}\u{2193} choose \u{b7} esc back".to_string(),
         (_, None) => "ctrl+n new \u{b7} ctrl+j join \u{b7} / commands \u{b7} ctrl+s settings".into(),
         (Mode::Normal, Some(_)) => "i type \u{b7} : command \u{b7} f files \u{b7} j/k session \u{b7} pgup/pgdn scroll \u{b7} ? help".into(),
@@ -1469,9 +1703,60 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             if app.rooms.len() > 1 { " \u{b7} tab next session" } else { "" },
             if r.files.is_empty() { "" } else { " \u{b7} ctrl+f files" }
         ),
+    }
+}
+
+/// The bottom row, on every screen: the chip, whether you sign and as what, your nick, the last
+/// message, and as many of the hints as fit, the last (the way out, or to the help) always.
+fn draw_status(f: &mut Frame, app: &App, area: Rect, bar: &Bar) {
+    let mut spans = vec![
+        Span::styled(
+            format!(" {} ", bar.chip),
+            Style::default().fg(bar.tone).add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        ),
+        Span::raw(" "),
+    ];
+    let message = if bar.anonymous {
+        app.locked.as_ref().and_then(|l| l.why.clone()).map(|w| (w, true))
+    } else {
+        match &app.ident {
+            None => spans.push(Span::styled("\u{25cb} unsigned", Style::default().fg(Color::Yellow))),
+            Some(i) => {
+                spans.push(Span::styled("\u{2713} signed ", Style::default().fg(Color::Green)));
+                spans.push(Span::styled(
+                    match i.kind {
+                        chat_core::IdentityKind::Age => "age",
+                        chat_core::IdentityKind::Pgp => "pgp",
+                        chat_core::IdentityKind::Native => "native",
+                    },
+                    faint(),
+                ));
+            }
+        }
+        if !app.nick.is_empty() {
+            spans.push(Span::styled("  ", faint()));
+            spans.push(Span::styled(
+                app.nick.clone(),
+                Style::default()
+                    .fg(app.colour.map_or(Color::Reset, rgb))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        app.status.as_ref().map(|(t, bad, _)| (t.clone(), *bad))
     };
+    if let Some((text, bad)) = message {
+        spans.push(Span::styled("  \u{203a} ", faint()));
+        spans.push(Span::styled(
+            text,
+            if bad {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                bold()
+            },
+        ));
+    }
     // As many of the hints as fit, from the first; the last stays whatever the width.
-    let parts: Vec<&str> = hint.split(" \u{b7} ").collect();
+    let parts: Vec<&str> = bar.hint.split(" \u{b7} ").filter(|p| !p.is_empty()).collect();
     let used = spans_width(&spans) + 3;
     let cols = area.width as usize;
     let last = parts.last().copied().unwrap_or_default();
@@ -1492,45 +1777,20 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         let text = fit.join(" \u{b7} ");
         let pad = cols.saturating_sub(spans_width(&spans) + width(&text) + 1);
         spans.push(Span::raw(" ".repeat(pad)));
-        spans.extend(hint_line(None, &text).spans.into_iter().skip(1));
+        spans.extend(hint_spans(&text));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// A picture on a page of its own: in the middle, scaled to fit, with its caption under it; or
 /// what's become of it, with a progress bar while it comes.
-fn draw_picture(f: &mut Frame, app: &App, num: u32, area: Rect) {
-    f.render_widget(Clear, area);
-    let [main, bar] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+fn draw_picture(f: &mut Frame, app: &App, num: u32, main: Rect) -> Bar {
+    f.render_widget(Clear, main);
     let (title, note, progress) = app.picture_text(num);
-    let status = match &app.status {
-        Some((text, bad, _)) => Line::styled(
-            format!(" {text}"),
-            if *bad {
-                Style::default().fg(Color::Red)
-            } else {
-                Style::default().fg(Color::Cyan)
-            },
-        ),
-        None => hint_line(Some("PICTURE"), &app.picture_hint(num)),
-    };
-    f.render_widget(Paragraph::new(status), bar);
     let buf = f.buffer_mut();
     let right = vec![Span::styled(hhmm(crate::text::unix_now()), faint())];
-    let room = title_room(main.width as usize, spans_width(&right));
-    let parts: Vec<&str> = title.split(" \u{203a} ").collect();
-    let mut t = Vec::new();
-    for (i, part) in parts.iter().enumerate() {
-        let last = i + 1 == parts.len();
-        t.push(Span::styled(part.to_string(), if last { bold() } else { faint() }));
-        if !last {
-            t.push(Span::styled(" \u{203a} ", faint()));
-        }
-    }
-    if spans_width(&t) > room {
-        t = vec![Span::styled(ell(parts.last().copied().unwrap_or_default(), room), bold())];
-    }
-    page_box(buf, main, Style::default().fg(Color::Magenta), false, t, right);
+    let t = crumb_title(&title, title_room(main.width as usize, spans_width(&right)));
+    page_box(buf, main, accent(), false, t, right);
     let (top, ih, left, iw) = (main.y + 1, main.height.saturating_sub(2), main.x + 1, main.width.saturating_sub(2));
     // A blank row and the caption under the picture.
     let area_h = ih.saturating_sub(2) as usize;
@@ -1564,16 +1824,7 @@ fn draw_picture(f: &mut Frame, app: &App, num: u32, area: Rect) {
             }
         }
     }
-}
-
-/// The settings page, or the signing identity's page under it, with the search box over it while
-/// it's open.
-fn draw_settings(f: &mut Frame, app: &App, p: &crate::settings_page::Page, area: Rect) {
-    let v = if p.pick.is_some() { app.pick_view(p) } else { app.settings_view(p) };
-    draw_page(f, app, &v, area);
-    if let Some((input, sel)) = &p.search {
-        draw_search(f, app, input, *sel, area);
-    }
+    Bar::page("PICTURE", &app.picture_hint(num))
 }
 
 // ---- list pages: settings, and the signing identity's page under it ----
@@ -1747,6 +1998,13 @@ fn title_room(w: usize, right_cols: usize) -> usize {
     w.saturating_sub(EDGE_ENDS + TITLE_PAD + if right_cols > 0 { right_cols + TITLE_PAD } else { 0 })
 }
 
+/// A box's side at (x, y). Like an edge, it's drawn in its own style alone, whatever box was drawn
+/// there before: a side two boxes share is the second's.
+fn box_side(buf: &mut Buffer, x: u16, y: u16, bs: Style) {
+    buf.set_style(Rect::new(x, y, 1, 1), Style::reset());
+    buf.set_string(x, y, "\u{2502}", bs);
+}
+
 /// A box's top or bottom edge, or a junction across it: lc, a rule with title near its left end
 /// and right near its right end, then rc.
 #[allow(clippy::too_many_arguments)]
@@ -1776,6 +2034,7 @@ fn edge(buf: &mut Buffer, x: u16, y: u16, w: u16, ends: [&str; 2], bs: Style, ti
         spans.push(Span::styled(" ", bs));
     }
     spans.push(Span::styled(format!("\u{2500}{}", ends[1]), bs));
+    buf.set_style(Rect::new(x, y, w as u16, 1), Style::reset());
     buf.set_line(x, y, &Line::from(spans), w as u16);
 }
 
@@ -1792,8 +2051,8 @@ fn page_box(buf: &mut Buffer, r: Rect, bs: Style, joined: bool, title: Vec<Span<
     };
     edge(buf, r.x, r.y, r.width, [tl, "\u{256e}"], bs, title, right);
     for y in r.y + 1..r.y + r.height - 1 {
-        buf.set_string(r.x, y, "\u{2502}", bs);
-        buf.set_string(r.x + r.width - 1, y, "\u{2502}", bs);
+        box_side(buf, r.x, y, bs);
+        box_side(buf, r.x + r.width - 1, y, bs);
     }
     edge(buf, r.x, r.y + r.height - 1, r.width, [bl, "\u{256f}"], bs, Vec::new(), Vec::new());
 }
@@ -2095,15 +2354,15 @@ fn draw_side(buf: &mut Buffer, top: u16, left: u16, w: u16, nrows: usize, side: 
             },
         };
         inner_line(buf, left, y, w - 1, spans);
-        buf.set_string(left + w - 1, y, "\u{2502}", faint());
+        box_side(buf, left + w - 1, y, faint());
     }
 }
 
 /// The export's box over its browser: what's written where, and what that means.
-fn draw_export_ask(f: &mut Frame, app: &App, path: &std::path::Path, area: Rect) {
+fn export_dialog(app: &App, path: &std::path::Path) -> Dialog {
     let shown = crate::browser::tilde(path);
     let age = app.ident.as_ref().is_none_or(|i| i.kind != chat_core::IdentityKind::Pgp);
-    let paras = [
+    let text = [
         format!("This writes your signing key, unencrypted, to {shown}, a new file only you can open."),
         "Anyone who reads it can sign as you, and peers who verified you would take them for you. Deleting it later \
          isn't erasing: the disk, its snapshots and its backups can keep traces."
@@ -2114,124 +2373,293 @@ fn draw_export_ask(f: &mut Frame, app: &App, path: &std::path::Path, area: Rect)
             if age { "age -d -i" } else { "gpg --import" }
         ),
     ];
-    draw_dialog(f, area, "EXPORT SIGNING KEY", &paras, None, "y write \u{b7} n back");
+    Dialog {
+        title: "EXPORT SIGNING KEY".into(),
+        text: paras(&text),
+        keys: "y write \u{b7} n back".into(),
+        ..Dialog::default()
+    }
 }
 
 /// The rooms kept in the save, by label, and "another room" last; or forgetting one, asked.
-fn draw_rooms(f: &mut Frame, app: &App, sel: usize, forgetting: bool, area: Rect) {
+fn rooms_dialog(app: &App, sel: usize, forgetting: bool) -> Dialog {
     let rooms = &app.settings.rooms;
     if forgetting && let Some(r) = rooms.get(sel) {
-        let text = format!("Forget {}? Its id and password go from the save.", r.label);
-        return draw_dialog(f, area, "JOIN SESSION", &[text], None, "y forget \u{b7} n keep");
+        return Dialog {
+            title: "JOIN SESSION".into(),
+            text: paras(&[format!("Forget {}? Its id and password go from the save.", r.label)]),
+            keys: "y forget \u{b7} n keep".into(),
+            ..Dialog::default()
+        };
     }
-    let w = 72.min(area.width.saturating_sub(2));
-    let items: Vec<(String, &str)> = rooms
-        .iter()
-        .map(|r| (r.label.clone(), if r.at_start { "joined at start" } else { "" }))
-        .chain(std::iter::once(("another room...".to_string(), "type its id")))
-        .collect();
-    let keys = if sel < rooms.len() {
-        "enter join \u{b7} s at start \u{b7} d forget \u{b7} esc close"
-    } else {
-        "enter type an id \u{b7} esc close"
-    };
-    let r = centered(area, w, items.len() as u16 + 6);
-    f.render_widget(Clear, r);
-    let buf = f.buffer_mut();
-    page_box(
-        buf,
-        r,
-        Style::default().fg(Color::Magenta),
-        false,
-        vec![Span::styled("JOIN SESSION", bold())],
-        Vec::new(),
-    );
-    let iw = r.width.saturating_sub(2);
-    inner_line(
-        buf,
-        r.x + 1,
-        r.y + 1,
-        iw,
-        vec![Span::raw("The rooms kept in the save, by label. Enter joins one.")],
-    );
-    let lw = items.iter().map(|(l, _)| width(l)).max().unwrap_or(0) + 3;
-    for (i, (label, detail)) in items.iter().enumerate() {
-        let on = i == sel;
-        let mut spans = vec![
-            pointer(on),
-            Span::styled(label.clone(), if on { accent_bold() } else { Style::default() }),
-        ];
-        spans.push(Span::raw(" ".repeat(lw.saturating_sub(width(label)))));
-        spans.push(Span::styled(detail.to_string(), faint()));
-        let draw = if on { picked_line } else { inner_line };
-        draw(buf, r.x + 1, r.y + 3 + i as u16, iw, spans);
+    Dialog {
+        title: "JOIN SESSION".into(),
+        text: paras(&["The rooms kept in the save, by label. Enter joins one.".to_string()]),
+        items: rooms
+            .iter()
+            .map(|r| (r.label.clone(), if r.at_start { "joined at start" } else { "" }.to_string()))
+            .chain(std::iter::once(("another room...".to_string(), "type its id".to_string())))
+            .collect(),
+        sel: Some(sel),
+        keys: if sel < rooms.len() {
+            "enter join \u{b7} s at start \u{b7} d forget \u{b7} esc close"
+        } else {
+            "enter type an id \u{b7} esc close"
+        }
+        .into(),
+        ..Dialog::default()
     }
-    buf.set_line(r.x + 1, r.y + 4 + items.len() as u16, &hint_line(None, keys), iw);
 }
 
-/// A box of paragraphs over a page: its title in the border, a status line under them if there's
-/// one, and its keys.
-fn draw_dialog(f: &mut Frame, area: Rect, title: &str, paras: &[String], status: Option<&str>, keys: &str) {
-    let w = 72.min(area.width.saturating_sub(2));
-    let mut lines = Vec::new();
-    for (i, p) in paras.iter().enumerate() {
+/// A paragraph in a box: text wrapped to the box (a line starting with "• " hangs under its text),
+/// a blank row, or a picture's row, centred as it is.
+enum Para {
+    Blank,
+    Text(Vec<(String, Style)>),
+    Art(Line<'static>),
+}
+
+/// Paragraphs of plain text with a blank row between them, each of their lines on its own.
+fn paras(texts: &[String]) -> Vec<Para> {
+    let mut out = Vec::new();
+    for (i, t) in texts.iter().enumerate() {
         if i > 0 {
-            lines.push(Line::raw(""));
+            out.push(Para::Blank);
         }
-        // Each line of a paragraph wraps on its own, a bullet's under its text.
-        for line in p.split('\n') {
-            let indent = if line.starts_with('\u{2022}') { 2 } else { 0 };
-            lines.extend(wrap(&[(line.to_string(), Style::default())], w.saturating_sub(4) as usize, indent));
-        }
+        out.extend(t.split('\n').map(|l| Para::Text(vec![(l.to_string(), Style::default())])));
     }
-    if let Some(s) = status {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(s.to_string(), accent()));
-    }
-    lines.push(Line::raw(""));
-    lines.push(hint_line(None, keys));
-    let r = centered(area, w, lines.len() as u16 + 2);
-    f.render_widget(Clear, r);
-    let buf = f.buffer_mut();
-    page_box(
-        buf,
-        r,
-        Style::default().fg(Color::Magenta),
-        false,
-        vec![Span::styled(title.to_string(), bold())],
-        Vec::new(),
-    );
-    for (i, l) in lines.into_iter().enumerate() {
-        let y = r.y + 1 + i as u16;
-        if y + 1 >= r.y + r.height {
-            break;
+    out
+}
+
+/// A paragraph's rows, `w` columns wide. A list item's bullet is in the accent, and the rows after
+/// its first line up under its text.
+fn para_rows(pieces: &[(String, Style)], w: usize) -> Vec<Line<'static>> {
+    match pieces.first().and_then(|(t, s)| t.strip_prefix("\u{2022} ").map(|rest| (rest, *s))) {
+        Some((rest, s)) => {
+            let mut p = vec![("\u{2022} ".to_string(), accent()), (rest.to_string(), s)];
+            p.extend(pieces[1..].iter().cloned());
+            wrap(&p, w, 2)
         }
-        let mut spans = vec![Span::raw(" ")];
-        spans.extend(l.spans);
-        buf.set_line(r.x + 1, y, &Line::from(spans), r.width.saturating_sub(2));
+        None => wrap(pieces, w, 0),
     }
 }
 
-/// /update's box: its console in a frame of its own with the last lines that fit, a progress bar
-/// with the percentage on its right, the current step, and the keys. The console loses rows on a
-/// short screen; the rest always shows.
-fn draw_update(f: &mut Frame, area: Rect) {
-    use chat_core::net::update::LineKind;
-    /// A blank, the console's edges, a blank, the bar, a blank, the step, a blank, the keys, and
-    /// the box's edges.
-    const FIXED: u16 = 11;
-    let v = chat_core::net::update::view();
-    let con = 12u16.min(area.height.saturating_sub(FIXED + 2)).max(1);
-    let r = centered(area, area.width.saturating_sub(6).min(100), con + FIXED);
-    f.render_widget(Clear, r);
+/// A field in a box: what's typed (as dots, if it's secret), where the cursor is, and what it
+/// takes while it's empty.
+struct Field {
+    text: Vec<char>,
+    cursor: usize,
+    placeholder: String,
+}
+
+impl Field {
+    fn of(input: &Input, mask: bool, placeholder: String) -> Field {
+        Field {
+            text: if mask {
+                vec!['\u{2022}'; input.chars.len()]
+            } else {
+                input.chars.clone()
+            },
+            cursor: input.cursor.min(input.chars.len()),
+            placeholder,
+        }
+    }
+}
+
+/// A question, a field or a list, in a box over the middle of the screen: its title on the top
+/// edge and its keys on the bottom one, then its text, the list with the one picked marked, the
+/// field (or `status`, while there's nothing to type), and a note under them.
+#[derive(Default)]
+struct Dialog {
+    title: String,
+    text: Vec<Para>,
+    /// Each with its detail, faint on its right.
+    items: Vec<(String, String)>,
+    sel: Option<usize>,
+    field: Option<Field>,
+    status: Option<String>,
+    note: Option<String>,
+    keys: String,
+}
+
+const DIALOG_MAX_W: u16 = 76;
+const CONSOLE_DIALOG_MAX_W: u16 = 100;
+/// The backdrop around a box: columns either side, and a row above and below while there's room.
+const DIALOG_MX: u16 = 2;
+const DIALOG_NOTE_ROWS: usize = 6;
+
+/// A box's width, at most `max`: its backdrop stays inside the frame's sides, so the frame is
+/// whole on a narrow screen too.
+fn dialog_fit(cols: u16, max: u16) -> u16 {
+    cols.saturating_sub(2 + 2 * DIALOG_MX).min(max)
+}
+
+fn dialog_rows(text: usize, list: usize, field: bool, note: usize) -> usize {
+    let part = |n: usize| if n > 0 { n + 1 } else { 0 };
+    1 + part(text) + part(list) + if field { 2 } else { 0 } + part(note)
+}
+
+/// A box's backdrop (a margin around it, shaded like the picked row) and its frame, the title on
+/// the top edge and the keys on the bottom one, `inner` rows high and `bw` wide, in the middle of
+/// `area`. Returns the rect inside its sides.
+fn dialog_frame(buf: &mut Buffer, area: Rect, bw: u16, inner: u16, my: u16, title: &str, keys: &str) -> Rect {
+    let bh = (inner + 2).min(area.height);
+    let (oh, ow) = ((bh + 2 * my).min(area.height), (bw + 2 * DIALOG_MX).min(area.width));
+    let outer = Rect::new(area.x + (area.width - ow) / 2, area.y + (area.height - oh) / 2, ow, oh);
+    Clear.render(outer, buf);
+    let b = Rect::new(outer.x + (ow - bw.min(ow)) / 2, outer.y + (oh - bh) / 2, bw.min(ow), bh);
+    let bs = accent();
+    let title = vec![Span::styled(ell(title, title_room(b.width as usize, 0)), accent_bold())];
+    edge(buf, b.x, b.y, b.width, ["\u{256d}", "\u{256e}"], bs, title, Vec::new());
+    for y in b.y + 1..b.bottom().saturating_sub(1) {
+        box_side(buf, b.x, y, bs);
+        box_side(buf, b.right() - 1, y, bs);
+    }
+    edge(
+        buf,
+        b.x,
+        b.bottom() - 1,
+        b.width,
+        ["\u{2570}", "\u{256f}"],
+        bs,
+        Vec::new(),
+        hint_spans(keys),
+    );
+    // The shade goes on last: the frame's edges start from no style at all.
+    if let Some(bg) = sel_bg() {
+        buf.set_style(outer, Style::default().bg(bg));
+    }
+    Rect::new(b.x + 1, b.y + 1, b.width.saturating_sub(2), bh.saturating_sub(2))
+}
+
+/// Draws a box over `area` (the screen above the bottom row). What doesn't fit is cut from the end
+/// of the text, then from the note, then from the list; the field always shows. Returns where the
+/// cursor goes, if it has a field.
+fn draw_dialog(f: &mut Frame, area: Rect, d: &Dialog) -> Option<(u16, u16)> {
+    let bw = dialog_fit(area.width, DIALOG_MAX_W);
+    if bw < 10 || area.height < 3 {
+        return None;
+    }
+    let tw = (bw as usize).saturating_sub(6);
+    let mut text: Vec<(Line<'static>, bool)> = Vec::new();
+    for p in &d.text {
+        match p {
+            Para::Blank => text.push((Line::default(), false)),
+            Para::Text(pieces) => text.extend(para_rows(pieces, tw).into_iter().map(|l| (l, false))),
+            Para::Art(l) => text.push((l.clone(), true)),
+        }
+    }
+    let note: Vec<String> = d.note.as_deref().map_or(Vec::new(), |n| wrap_plain(n, tw));
+    let field = d.field.is_some() || d.status.is_some();
+    let (mut tn, mut nn, mut ln) = (text.len(), note.len().min(DIALOG_NOTE_ROWS), d.items.len());
+    let avail = area.height as usize;
+    let my = if dialog_rows(tn, ln, field, nn) + 4 > avail { 0 } else { 1 };
+    while dialog_rows(tn, ln, field, nn) + 2 > avail && (tn > 0 || nn > 0 || ln > 1) {
+        if tn > 0 {
+            tn -= 1;
+        } else if nn > 0 {
+            nn -= 1;
+        } else {
+            ln -= 1;
+        }
+    }
+    let inner = dialog_rows(tn, ln, field, nn).min(avail.saturating_sub(2)).max(1) as u16;
+    let r = dialog_frame(f.buffer_mut(), area, bw, inner, my, &d.title, &d.keys);
     let buf = f.buffer_mut();
-    let title = vec![Span::styled("UPDATE", bold())];
-    page_box(buf, r, Style::default().fg(Color::Magenta), false, title, Vec::new());
-    let (x, iw) = (r.x + 1, r.width.saturating_sub(2));
-    let cw = iw.saturating_sub(4);
-    let mut y = r.y + 2;
-    page_box(buf, Rect::new(x + 2, y, cw, con + 2), faint(), false, Vec::new(), Vec::new());
-    let first = v.log.len().saturating_sub(usize::from(con));
+    // Everything starts a column in from the box's padding.
+    let (x, cw, end) = (r.x + 2, r.width.saturating_sub(4), r.bottom());
+    let mut y = r.y + 1;
+    let put = |buf: &mut Buffer, y: u16, line: &Line, at: u16| {
+        if y < end {
+            buf.set_line(at, y, line, cw);
+        }
+    };
+    for (l, art) in text.iter().take(tn) {
+        if !art {
+            put(buf, y, l, x);
+        } else if y < end {
+            buf.set_line(r.x + r.width.saturating_sub(l.width() as u16) / 2, y, l, r.width);
+        }
+        y += 1;
+    }
+    if tn > 0 {
+        y += 1;
+    }
+    if ln > 0 {
+        let first = match d.sel {
+            Some(s) if s >= ln => s + 1 - ln,
+            _ => 0,
+        };
+        for (i, (name, detail)) in d.items.iter().enumerate().skip(first).take(ln) {
+            let on = d.sel == Some(i);
+            let (nw, dw) = (width(name), width(detail));
+            // The detail is left out unless the whole name fits beside it.
+            let dw = if 2 + nw + 3 + dw > cw as usize { 0 } else { dw };
+            let room = (cw as usize).saturating_sub(2 + if dw > 0 { dw + 3 } else { 1 });
+            let mut spans = vec![pointer(on), Span::styled(ell(name, room), if on { accent_bold() } else { bold() })];
+            if dw > 0 {
+                spans.push(Span::raw(" ".repeat((cw as usize).saturating_sub(spans_width(&spans) + dw))));
+                spans.push(Span::styled(detail.clone(), faint()));
+            }
+            put(buf, y, &Line::from(spans), x);
+            y += 1;
+        }
+        y += 1;
+    }
+    let mut cursor = None;
+    if let Some(fl) = &d.field {
+        // Scrolled so the text before the cursor fits, with a column for the cursor itself.
+        let room = (cw as usize).saturating_sub(2);
+        let mut spans = vec![Span::styled("\u{203a} ", accent_bold())];
+        let before = |from: usize| fl.text[from..fl.cursor].iter().collect::<String>();
+        let mut skip = 0;
+        while skip < fl.cursor && width(&before(skip)) > room.saturating_sub(1) {
+            skip += 1;
+        }
+        if fl.text.is_empty() {
+            spans.push(Span::styled(ell(&fl.placeholder, room), faint()));
+        } else {
+            spans.push(Span::raw(ell(&fl.text[skip..].iter().collect::<String>(), room)));
+        }
+        put(buf, y, &Line::from(spans), x);
+        if y < end {
+            cursor = Some((x + 2 + width(&before(skip)) as u16, y));
+        }
+        y += 2;
+    } else if let Some(s) = &d.status {
+        put(buf, y, &Line::styled(ell(s, cw as usize), faint()), x);
+        y += 2;
+    }
+    for l in note.iter().take(nn) {
+        put(buf, y, &Line::styled(l.clone(), faint()), x);
+        y += 1;
+    }
+    cursor
+}
+
+/// /update's box, wider than the rest: its console in a frame of its own with the last lines that
+/// fit, then a progress bar as wide as the console with the percentage on its right, then the
+/// current step. The console loses rows on a short screen; the rest always shows.
+fn draw_update(f: &mut Frame, area: Rect) -> Option<(u16, u16)> {
+    use chat_core::net::update::LineKind;
+    /// A blank, the console's edges, a blank, the bar, a blank, the step and a blank.
+    const FIXED: usize = 8;
+    let v = chat_core::net::update::view();
+    let bw = dialog_fit(area.width, CONSOLE_DIALOG_MAX_W);
+    let avail = area.height as usize;
+    let mut con = 12;
+    let my = if con + FIXED + 4 > avail { 0 } else { 1 };
+    if con + FIXED + 2 > avail {
+        con = avail.saturating_sub(FIXED + 2).max(1);
+    }
+    let keys = if v.running { "esc hide" } else { "enter close" };
+    let r = dialog_frame(f.buffer_mut(), area, bw, (con + FIXED) as u16, my, "UPDATE", keys);
+    let buf = f.buffer_mut();
+    let (x, cw) = (r.x + 2, r.width.saturating_sub(4));
+    let mut y = r.y + 1;
+    let console = Rect::new(x, y, cw, con as u16 + 2);
+    page_box(buf, console, faint(), false, Vec::new(), Vec::new());
+    let first = v.log.len().saturating_sub(con);
     for (i, (kind, line)) in v.log[first..].iter().enumerate() {
         let style = match kind {
             LineKind::Detail => faint(),
@@ -2239,10 +2667,10 @@ fn draw_update(f: &mut Frame, area: Rect) {
             LineKind::Good => Style::default().fg(Color::Green),
             LineKind::Bad => Style::default().fg(Color::Red),
         };
-        let room = cw.saturating_sub(2);
-        buf.set_line(x + 3, y + 1 + i as u16, &Line::styled(ell(line, usize::from(room)), style), room);
+        let room = cw.saturating_sub(4);
+        buf.set_line(x + 2, y + 1 + i as u16, &Line::styled(ell(line, usize::from(room)), style), room);
     }
-    y += con + 3;
+    y += con as u16 + 3;
     let pm = v.permille.min(1000);
     let mut right = match v.amount.as_str() {
         "" => format!("{:3}%", pm / 10),
@@ -2254,7 +2682,7 @@ fn draw_update(f: &mut Frame, area: Rect) {
     let mut bar = bar_spans(pm, usize::from(cw).saturating_sub(width(&right) + 1));
     bar.push(Span::raw(" "));
     bar.push(Span::styled(right, bold()));
-    buf.set_line(x + 2, y, &Line::from(bar), cw);
+    buf.set_line(x, y, &Line::from(bar), cw);
     y += 2;
     let st = if v.running {
         accent_bold()
@@ -2267,9 +2695,8 @@ fn draw_update(f: &mut Frame, area: Rect) {
         Span::styled("\u{203a} ", st),
         Span::styled(ell(&v.step, usize::from(cw.saturating_sub(2))), st),
     ];
-    buf.set_line(x + 2, y, &Line::from(step), cw);
-    let keys = if v.running { "esc hide" } else { "enter close" };
-    buf.set_line(x, y + 2, &hint_line(None, keys), iw);
+    buf.set_line(x, y, &Line::from(step), cw);
+    None
 }
 
 /// Plain text wrapped to `w` columns.
@@ -2280,13 +2707,9 @@ fn wrap_plain(text: &str, w: usize) -> Vec<String> {
         .collect()
 }
 
-/// What the keys do, along the bottom: each key in the accent, what it does faint.
-fn hint_line(chip: Option<&str>, hint: &str) -> Line<'static> {
-    let mut spans = vec![Span::raw(" ")];
-    if let Some(c) = chip {
-        spans.push(Span::styled(format!(" {c} "), accent_bold().add_modifier(Modifier::REVERSED)));
-        spans.push(Span::raw(" "));
-    }
+/// "key action \u{b7} key action": each key in the accent, what it does faint.
+fn hint_spans(hint: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
     for (i, item) in hint.split(" \u{b7} ").enumerate() {
         if i > 0 {
             spans.push(Span::styled(" \u{b7} ", faint()));
@@ -2297,23 +2720,34 @@ fn hint_line(chip: Option<&str>, hint: &str) -> Line<'static> {
             spans.push(Span::styled(format!(" {what}"), faint()));
         }
     }
-    Line::from(spans)
+    spans
+}
+
+/// "a \u{203a} b \u{203a} c": the path to a page faint, and the page itself bold; just the page when
+/// that's all that fits in `room`.
+fn crumb_title(title: &str, room: usize) -> Vec<Span<'static>> {
+    let parts: Vec<&str> = title.split(" \u{203a} ").collect();
+    let mut t = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let last = i + 1 == parts.len();
+        t.push(Span::styled(part.to_string(), if last { bold() } else { faint() }));
+        if !last {
+            t.push(Span::styled(" \u{203a} ", faint()));
+        }
+    }
+    if spans_width(&t) > room {
+        t = vec![Span::styled(ell(parts.last().copied().unwrap_or_default(), room), bold())];
+    }
+    t
 }
 
 /// A list page over the whole screen: the sections on the left, the page beside them sharing its
 /// edge, and the bar along the bottom.
-fn draw_page(f: &mut Frame, app: &App, v: &PageView, area: Rect) {
-    f.render_widget(Clear, area);
-    let [main, bar] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-    let boxed = area.height >= BOXED_ROWS && area.width >= BOXED_COLS;
+fn draw_page(f: &mut Frame, v: &PageView, main: Rect) -> Bar {
+    f.render_widget(Clear, main);
+    let boxed = main.height + 1 >= BOXED_ROWS && main.width >= BOXED_COLS;
     // A page that gives the list on the left keeps its column while the list is empty.
     let navw = if boxed { left_width(main.width) } else { 0 };
-    let bar_line = match &app.status {
-        Some((text, true, _)) => Line::styled(format!(" {text}"), Style::default().fg(Color::Red)),
-        Some((text, false, _)) => Line::styled(format!(" {text}"), Style::default().fg(Color::Cyan)),
-        None => hint_line(v.chip, &v.hint),
-    };
-    f.render_widget(Paragraph::new(bar_line), bar);
     let buf = f.buffer_mut();
     if navw > 0 {
         draw_nav(buf, Rect { width: navw, ..main }, v);
@@ -2324,7 +2758,7 @@ fn draw_page(f: &mut Frame, app: &App, v: &PageView, area: Rect) {
         width: main.width - x,
         ..main
     };
-    let bs = Style::default().fg(Color::Magenta);
+    let bs = accent();
     let (top, ih, left, iw) = if boxed {
         (r.y + 1, r.height.saturating_sub(2), r.x + 1, r.width.saturating_sub(2))
     } else {
@@ -2333,19 +2767,7 @@ fn draw_page(f: &mut Frame, app: &App, v: &PageView, area: Rect) {
     let cw = (iw as usize).saturating_sub(2);
     if boxed {
         let right = vec![Span::styled(hhmm(crate::text::unix_now()), faint())];
-        let room = title_room(r.width as usize, spans_width(&right));
-        let parts: Vec<&str> = v.title.split(" \u{203a} ").collect();
-        let mut title = Vec::new();
-        for (i, part) in parts.iter().enumerate() {
-            let last = i + 1 == parts.len();
-            title.push(Span::styled(part.to_string(), if last { bold() } else { faint() }));
-            if !last {
-                title.push(Span::styled(" \u{203a} ", faint()));
-            }
-        }
-        if spans_width(&title) > room {
-            title = vec![Span::styled(ell(parts.last().copied().unwrap_or_default(), room), bold())];
-        }
+        let title = crumb_title(&v.title, title_room(r.width as usize, spans_width(&right)));
         page_box(buf, r, bs, navw > 0, title, right);
     }
 
@@ -2442,78 +2864,81 @@ fn draw_page(f: &mut Frame, app: &App, v: &PageView, area: Rect) {
             );
         }
     }
+    Bar::page(v.chip.unwrap_or("SETTINGS"), &v.hint)
 }
 
 const SEARCH_ROWS: usize = 8;
 
 /// The settings' search box: the matches above the field, SEARCH_ROWS at a time so the box keeps
 /// its height as they change, each with its place on the page.
-fn draw_search(f: &mut Frame, app: &App, input: &crate::app::Input, sel: usize, area: Rect) {
+fn search_dialog(app: &App, input: &Input, sel: usize) -> Dialog {
     use chat_core::net::settings::{self as st, PAGE};
-    let query = input.text();
-    let found = app.search_found(&query);
-    let r = centered(area, 76, SEARCH_ROWS as u16 + 7);
-    f.render_widget(Clear, r);
-    let buf = f.buffer_mut();
-    page_box(
-        buf,
-        r,
-        Style::default().fg(Color::Magenta),
-        false,
-        vec![Span::styled("SEARCH SETTINGS", bold())],
-        Vec::new(),
-    );
-    let (left, iw) = (r.x + 1, r.width.saturating_sub(2));
+    let found = app.search_found(&input.text());
     let sel = sel.min(found.len().saturating_sub(1));
     let first = (sel + 1).saturating_sub(SEARCH_ROWS);
-    let half = (iw as usize).saturating_sub(4) / 2;
-    for k in 0..SEARCH_ROWS {
-        let y = r.y + 2 + k as u16;
-        let Some(&i) = found.get(first + k) else {
-            if found.is_empty() && k == 0 {
-                inner_line(buf, left, y, iw, vec![Span::raw("  "), Span::styled("No setting matches", faint())]);
-            }
-            continue;
-        };
-        let on = first + k == sel;
-        let hidden = if app.row_shown(i) { "" } else { " (hidden)" };
-        let label = ell(PAGE[i].label, half);
-        let pad = " ".repeat(half + 1 - width(&label));
-        inner_line(
-            buf,
-            left,
-            y,
-            iw,
-            vec![
-                pointer(on),
-                Span::styled(label, if on { accent_bold() } else { Style::default() }),
-                Span::raw(pad),
-                Span::styled(ell(&format!("{}{hidden}", st::place(i)), half), faint()),
-            ],
-        );
+    let mut items: Vec<(String, String)> = (first..first + SEARCH_ROWS)
+        .map(|k| match found.get(k) {
+            Some(&i) => (
+                PAGE[i].label.to_string(),
+                format!("{}{}", st::place(i), if app.row_shown(i) { "" } else { " (hidden)" }),
+            ),
+            None => (String::new(), String::new()),
+        })
+        .collect();
+    if found.is_empty() {
+        items[0].0 = "No setting matches".into();
     }
-    let field = r.y + 3 + SEARCH_ROWS as u16;
-    let shown = if query.is_empty() {
-        Span::styled("a setting's name or /set name, or a word in its help", faint())
-    } else {
-        Span::raw(query.clone())
-    };
-    inner_line(buf, left, field, iw, vec![Span::styled("\u{203a} ", faint()), shown]);
-    let keys = if found.is_empty() {
-        "esc back"
-    } else {
-        "enter open \u{b7} up/down move \u{b7} esc back"
-    };
-    buf.set_line(left, field + 2, &hint_line(None, keys), iw);
-    let cursor: String = input.chars[..input.cursor].iter().collect();
-    if !app.asking_quit {
-        f.set_cursor_position((left + 3 + width(&cursor) as u16, field));
+    Dialog {
+        title: "SEARCH SETTINGS".into(),
+        items,
+        sel: (!found.is_empty()).then(|| sel - first),
+        field: Some(Field::of(
+            input,
+            false,
+            "a setting's name or /set name, or a word in its help".into(),
+        )),
+        keys: if found.is_empty() {
+            "esc back"
+        } else {
+            "enter open \u{b7} up/down move \u{b7} esc back"
+        }
+        .into(),
+        ..Dialog::default()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_box_keeps_its_field_and_keys_when_its_text_is_cut() {
+        let d = Dialog {
+            title: "JOIN SESSION".into(),
+            text: paras(&["word ".repeat(200)]),
+            field: Some(Field {
+                text: Vec::new(),
+                cursor: 0,
+                placeholder: "password".into(),
+            }),
+            note: Some("The password for a-room, as you were given it.".into()),
+            keys: "enter join \u{b7} esc cancel".into(),
+            ..Dialog::default()
+        };
+        let (w, h) = (70, 14);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        let mut cursor = None;
+        t.draw(|f| cursor = draw_dialog(f, f.area(), &d)).unwrap();
+        let rows: Vec<String> = (0..h)
+            .map(|y| (0..w).map(|x| t.backend().buffer()[(x, y)].symbol().to_string()).collect())
+            .collect();
+        assert!(rows.iter().any(|r| r.contains("\u{256d}\u{2500} JOIN SESSION \u{2500}")));
+        assert!(rows.iter().any(|r| r.contains("enter join \u{b7} esc cancel \u{2500}\u{256f}")));
+        // The text gives way; the field and the cursor at its start stay.
+        let (cx, cy) = cursor.expect("the field takes the cursor");
+        assert!(rows[cy as usize].contains("\u{203a} password"));
+        assert_eq!(rows[cy as usize].chars().nth(cx as usize), Some('p'));
+    }
 
     #[test]
     fn makes_colours_readable() {

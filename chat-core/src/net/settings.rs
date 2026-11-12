@@ -794,7 +794,7 @@ pub const PAGE: &[PageRow] = &[
         group: None,
         label: "Reopen sessions",
         values: "on|off",
-        help: "on: keeps the sessions you have open, their ids and passwords sealed in the save that's open (so it needs :install), and opens them again when chat starts. Ctrl+C then quits without leaving them: peers see you go offline, or leave on older versions. :quit leaves one for good, :quitall every one. Calls aren't kept. Only the full-screen UI keeps them.",
+        help: "on: keeps the sessions you have open, their ids and passwords sealed in the save that's open (so it needs :install), and opens them again when chat starts. Ctrl+C then quits without leaving them: peers see you go offline, or leave on older versions. :leave leaves one for good, :quitall every one. Calls aren't kept. Only the full-screen UI keeps them.",
     },
     PageRow {
         name: "filelimit",

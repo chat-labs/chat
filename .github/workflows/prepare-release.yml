@@ -1,0 +1,88 @@
+# Starts a release, or a beta, of chat (tui) or chat-core (core): `just prepare` moves the crate's
+# changelog's open sections under the new version and puts it in its Cargo.toml, and this opens
+# them as a "Release TAG" pull request. Merging it starts the Publish workflow, which publishes it
+# once an admin approves.
+#
+# A pull request this workflow's token opens starts no workflows, so CI checks the release commit
+# once it's merged, on main.
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: "tui (chat) or core (chat-core)"
+        type: choice
+        options: [tui, core]
+        required: true
+      kind:
+        description: "patch, minor, major or a version (empty: Cargo.toml's, which finishes its betas)"
+        type: string
+        default: ""
+      beta:
+        description: A beta of it, not the release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  JUST_VERSION: 1.58.0
+
+jobs:
+  prepare:
+    name: Release pull request
+    if: github.repository == 'chat-labs/chat' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Every tag too, which numbers the betas.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+      # Cargo.lock gets the new version offline, from what this fetches.
+      - run: cargo fetch --locked
+      - name: Changelog and version
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRATE: ${{ inputs.crate }}
+          KIND: ${{ inputs.kind }}
+          BETA: ${{ inputs.beta }}
+        run: |
+          if [ "$BETA" = true ]; then set -- beta; else set --; fi
+          t=$(just prepare "$CRATE" "$@" ${KIND:+"$KIND"})
+          echo "$t" | grep -Eqx '(v|chat-core-v)[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?'
+          echo "tag=$t" >> "$GITHUB_OUTPUT"
+      - name: Pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRATE: ${{ inputs.crate }}
+          T: ${{ steps.prepare.outputs.tag }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "release/$T"
+          git commit -qam "Release $T"
+          git push origin "release/$T"
+          gh pr create --base main --head "release/$T" --title "Release $T" --body "$(cat <<EOF
+          chat-$CRATE/CHANGELOG.md's open sections under $T's version, and that version in
+          chat-$CRATE/Cargo.toml and Cargo.lock.
+
+          Merging this starts the Publish workflow, which publishes $T as a GitHub release once an
+          admin approves it there (for chat, after building its binaries and checking they
+          reproduce).
+          EOF
+          )"

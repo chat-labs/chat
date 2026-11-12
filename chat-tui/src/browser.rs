@@ -437,18 +437,6 @@ impl App {
         if path.is_empty() {
             self.fail("type the key file's path - or Esc to go back");
         } else if self.load_key(kind, &chat_core::net::files::typed_path_here(path)) {
-            let page = match self.behind.take().map(|m| *m) {
-                Some(Modal::Settings(p)) => Some(p),
-                Some(Modal::Browser(b)) => match b.back {
-                    Back::Page(p) => Some(p),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(mut p) = page {
-                p.pick = None;
-                self.show_page(p);
-            }
             return;
         }
         self.modal = Some(Modal::Prompt {
@@ -722,8 +710,12 @@ mod tests {
         for d in ["b", ".a", "A"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
-        for f in ["z.txt", ".x", "c.txt", "bad\u{1b}[2J"] {
+        for f in ["z.txt", ".x", "c.txt"] {
             std::fs::write(dir.join(f), "").unwrap();
+        }
+        // Windows refuses control characters in file names, so there's nothing to hide there.
+        if !cfg!(windows) {
+            std::fs::write(dir.join("bad\u{1b}[2J"), "").unwrap();
         }
         let names: Vec<String> = list(&dir).unwrap().into_iter().map(|e| e.name).collect();
         std::fs::remove_dir_all(&dir).unwrap();

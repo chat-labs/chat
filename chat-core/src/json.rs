@@ -17,26 +17,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// "HH:MM", local time.
 fn hhmm() -> String {
-    hhmm_at(
+    net::history::hhmm(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
     )
-}
-
-/// "HH:MM" of a Unix time, local time.
-fn hhmm_at(unix: u64) -> String {
-    let t = unix as i64;
-    #[cfg(unix)]
-    {
-        // SAFETY: localtime_r only writes into the struct it's given.
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        let tt = t as libc::time_t;
-        if !unsafe { libc::localtime_r(&tt, &mut tm) }.is_null() {
-            return format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
-        }
-    }
-    format!("{:02}:{:02}", (t / 3600) % 24, (t / 60) % 60)
 }
 
 tokio::task_local! {
@@ -135,7 +120,7 @@ fn file_json(f: &FileInfo, me: PeerId) -> Value {
     o.insert("mine".into(), f.mine.into());
     o.insert("from".into(), f.from.unwrap_or(me).hex().into());
     o.insert("image".into(), f.image.into());
-    o.insert("at".into(), hhmm_at(f.at).into());
+    o.insert("at".into(), net::history::hhmm(f.at).into());
     let state = match &f.state {
         FileState::Offered | FileState::Withdrawn => "offered",
         FileState::Fetching { .. } => "fetching",
@@ -437,7 +422,9 @@ impl State {
             cfg.create = false;
             cfg.verify_required = true;
         } else if cfg.password.is_none() && cfg.room.is_some() && cfg.invite.is_none() {
-            cfg.password = Some(std::env::var("CHAT_PASSWORD").unwrap_or_default());
+            // A new room gets one in words, as the id is often passed around in the open.
+            let made = || cfg.create.then(names::random_password);
+            cfg.password = Some(std::env::var("CHAT_PASSWORD").ok().or_else(made).unwrap_or_default());
         }
         cfg.nick = s("nick").unwrap_or_else(names::random_nick);
         if let Some(c) = s("colour") {
@@ -474,6 +461,25 @@ impl State {
         };
         if let Some(relays) = route.get("relays").and_then(Value::as_array) {
             cfg.route.relays = relays.iter().filter_map(Value::as_str).map(str::to_string).collect();
+        }
+        // A tor that's already running, or the one to start, as the Tor rows of the settings have it.
+        if let Some(t) = route.get("tor") {
+            let field = |k: &str| t.get(k).and_then(Value::as_str);
+            let mut rows = net::settings::Settings::default();
+            for (k, row) in [("socks", "torsocks"), ("control", "torcontrol")] {
+                if let Some(x) = field(k) {
+                    rows.set(row, x).map_err(|_| "tor \"socks\" and \"control\" are host:port")?;
+                }
+            }
+            if let Some(x) = field("launch") {
+                rows.set("torlaunch", x).map_err(|_| "tor \"launch\" is auto, always or never")?;
+            }
+            if let Some(p) = field("path") {
+                let found = net::tor_ext::tor_program(p)
+                    .ok_or_else(|| format!("can't use {p} as tor - it has to be a full path to a program only root or you can change"))?;
+                rows.set("torpath", &found.to_string_lossy())?;
+            }
+            self.client.set_tor_use(rows.tor_use(field("password").unwrap_or_default()));
         }
         // Both at the top level and inside route, where apps put them too.
         cfg.route.port = v.get("port").or_else(|| route.get("port")).and_then(Value::as_u64).unwrap_or(0) as u16;
@@ -653,7 +659,7 @@ impl State {
                 self.move_json = match ask {
                     Some(a) => json!({
                         "t": "move", "seq": a.seq, "from": a.from, "coming": a.coming.len(),
-                        "names": names::list(&a.coming), "at": hhmm_at(a.at),
+                        "names": names::list(&a.coming), "at": net::history::hhmm(a.at),
                     }),
                     None => json!({"t": "move", "seq": 0}),
                 };
@@ -912,6 +918,13 @@ async fn serve_lines(mut lines: tokio::sync::mpsc::UnboundedReceiver<String>) {
             Some("quit") => {
                 emit(json!({"t": "bye"}));
                 return;
+            }
+            // A new room's id and password, made up as start makes them, for a program to show
+            // before the room opens and let its user change.
+            Some("suggest") => {
+                if !emit(json!({"t": "suggest", "room": names::random_room_id(), "password": names::random_password()})) {
+                    return;
+                }
             }
             Some("start") => {
                 let cfg = match st.start_config(&v) {

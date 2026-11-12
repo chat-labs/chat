@@ -210,6 +210,8 @@ pub static SANDBOX: std::sync::OnceLock<chat_core::net::sandbox::Sandbox> = std:
 static ALLOC: chat_core::net::memlock::LockedAlloc = chat_core::net::memlock::LockedAlloc;
 
 fn main() -> std::io::Result<()> {
+    // chat's version, not chat-core's: what it updates from, and the build peers are told.
+    update::set_version(env!("CARGO_PKG_VERSION"));
     chat_core::harden_process();
     let mut argv = std::env::args().skip(1);
     if argv.next().as_deref() == Some(update::HELPER_ARG)
@@ -306,7 +308,7 @@ fn run_update(args: &Args) -> i32 {
         println!(
             "chat: checking GitHub for a newer release{} (v{} here){}...",
             if betas { " or beta" } else { "" },
-            update::VERSION,
+            update::version(),
             if over_tor { " through Tor" } else { "" }
         );
         let addr = proxy.as_ref().map(|p| p.addr.clone());
@@ -346,7 +348,8 @@ async fn async_main(args: Args) -> std::io::Result<()> {
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     let result = run(&mut terminal, args).await;
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
-    write_sequences(&[&ansi(crossterm::event::DisableMouseCapture), input::THEME_UNWATCH]);
+    // The terminal's own cursor shape back.
+    write_sequences(&[&ansi(crossterm::event::DisableMouseCapture), input::THEME_UNWATCH, b"\x1b[0 q"]);
     ratatui::restore();
     notify::shutdown();
     result
@@ -411,8 +414,15 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, args: Args) -> std::io::Re
     #[cfg(unix)]
     let mut resized = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
+    let mut block_cursor = None;
     loop {
         let done = terminal.draw(|f| ui::draw(f, &app))?;
+        // A steady block while the line is in NORMAL, a steady bar in every field.
+        let block = app.mode == cmdline::Mode::Normal && app.modal.is_none() && app.locked.is_none();
+        if block_cursor != Some(block) {
+            block_cursor = Some(block);
+            write_sequences(&[if block { b"\x1b[2 q" } else { b"\x1b[6 q" }]);
+        }
         // The chat's links, while nothing covers it: drawn again inside OSC 8, so a terminal that
         // takes it opens the link on a click.
         let linked: Vec<(String, Vec<Placed>)> = if app.modal.is_none() && app.locked.is_none() {

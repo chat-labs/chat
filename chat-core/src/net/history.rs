@@ -34,13 +34,20 @@ impl Line {
 
 const STAMP_LEN: usize = 16;
 
+/// "HH:MM" for a Unix time, in local time: the end of its [`stamp`].
+pub fn hhmm(unix: u64) -> String {
+    let s = stamp(unix);
+    s[s.len() - 5..].to_owned()
+}
+
 /// "YYYY-MM-DD HH:MM" for a Unix time, in local time.
 pub fn stamp(unix: u64) -> String {
     #[cfg(unix)]
     {
         // SAFETY: localtime_r only writes into the struct it's given.
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        let tt = unix as libc::time_t;
+        // time_t's width is libc's to pick (musl's is moving to 64-bit).
+        let tt = unix as _;
         if !unsafe { libc::localtime_r(&tt, &mut tm) }.is_null() {
             return format!(
                 "{:04}-{:02}-{:02} {:02}:{:02}",

@@ -6,19 +6,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// "HH:MM", local time.
-pub fn hhmm(unix: u64) -> String {
-    #[cfg(unix)]
-    {
-        // SAFETY: localtime_r only writes into the struct it's given.
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        let t = unix as libc::time_t;
-        if !unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
-            return format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
-        }
-    }
-    format!("{:02}:{:02}", (unix / 3600) % 24, (unix / 60) % 60)
-}
+pub use chat_core::net::history::hhmm;
 
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()

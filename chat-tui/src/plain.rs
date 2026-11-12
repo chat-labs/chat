@@ -346,7 +346,7 @@ fn print_new(app: &mut App, p: &mut Printed) {
                 RouteMode::Direct => format!("udp/{}, routing: direct", info.port),
             };
             println!(
-                "room '{}', you are {} (peer {}). encrypted, {route}. :quit or EOF to stop.",
+                "room '{}', you are {} (peer {}). encrypted, {route}. :leave or EOF to stop.",
                 info.room,
                 info.nick,
                 info.me.short()
@@ -421,7 +421,7 @@ fn print_new(app: &mut App, p: &mut Printed) {
     let _ = std::io::stdout().flush();
 }
 
-/// Runs --simple until the input ends, :quit leaves, or Ctrl+C is pressed twice.
+/// Runs --simple until the input ends, :leave leaves the last room, or Ctrl+C is pressed twice.
 pub async fn run(mut app: App, mut rx: mpsc::UnboundedReceiver<Msg>) -> std::io::Result<()> {
     let mut printed = Printed::default();
     app.start_rooms();

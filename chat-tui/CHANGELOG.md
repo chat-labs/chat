@@ -1,6 +1,46 @@
 # Changelog
 
-## 0.6.0-alpha.1
+## 0.7.0-beta.1
+
+### Changed
+
+- chat-core is released apart from chat now, on the same releases page, each release titled by
+  its date. /update with betas on takes the newest of chat's, never chat-core's.
+- With more than one save, the one to open is picked from a list, as chat starts and from
+  /install, in place of typing its name.
+- The console's lines are highlighted: where each comes from, what went right, what's under way
+  and what went wrong, commands, addresses, paths and numbers, and the room and people's names.
+  Peers' messages aren't.
+- /quit (and q, exit, close, bd, bw) is gone: /leave leaves the room on screen, /quitall quits.
+- /leave closes a room that's still opening, failed to open or has closed, too.
+
+### Fixed
+
+- /leave writes the room's kept history before it goes, and says so if the save refused it.
+
+## 0.6.1
+
+### Changed
+
+- One look across the screens: secondary text in the terminal's own faint style, in place of the
+  dark grey and cyan some used; every box drawn with the same edges, title and corners; and every
+  question, field and list in one kind of box, its keys on the bottom edge and a note under it.
+- One bottom bar on every screen: where you are, your identity and nick, the last message, and the
+  keys of what's open.
+- The welcome and an empty room's text sit in the chat's own box, and with the sidebar hidden the
+  chat's title shows the room's state and unread messages elsewhere.
+- The cursor is a block in NORMAL and a bar in every field.
+
+### Fixed
+
+- A signing key made from a password in the settings goes back to the settings, not into the chat.
+- A save's news or a new key that comes up over a page keeps the page under its box.
+- Locking keeps what was open; while locked, a paste goes to the passphrase and the mouse does
+  nothing.
+- A refused room id, save name or empty passphrase keeps its box open, with what was typed.
+- chat builds with Rust 1.92 again, the oldest it names.
+
+## 0.6.0
 
 - chat in the terminal, built on chat-core: rooms with no server and no accounts, end-to-end
   encrypted, through Tor by default (built in, nothing to install), or direct for speed.
