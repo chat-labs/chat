@@ -13,6 +13,8 @@ chat's JSON interface.
 - `net::update::set_version` and `net::update::version`: the version of the program chat-core
   runs in, which it updates from and tells peers its build is. An interface with its own version
   sets it as it starts; chat-json's is chat-core's.
+- chat-json's `suggest`, before `start`: a new room's id and password, made up as `start`
+  makes them, for a program to show and let its user change.
 
 ### Changed
 
@@ -24,3 +26,5 @@ chat's JSON interface.
   `launch` and `path`), which it read past before, so a room always took the defaults.
 - Logging in to a running tor with its cookie (SAFECOOKIE) works: tor's challenge is in capital
   hex, which was taken as malformed.
+- chat-json's `start` for a new room with an id and no password makes one up in words, as
+  without the id, instead of opening it with an empty password.

@@ -422,7 +422,9 @@ impl State {
             cfg.create = false;
             cfg.verify_required = true;
         } else if cfg.password.is_none() && cfg.room.is_some() && cfg.invite.is_none() {
-            cfg.password = Some(std::env::var("CHAT_PASSWORD").unwrap_or_default());
+            // A new room gets one in words, as the id is often passed around in the open.
+            let made = || cfg.create.then(names::random_password);
+            cfg.password = Some(std::env::var("CHAT_PASSWORD").ok().or_else(made).unwrap_or_default());
         }
         cfg.nick = s("nick").unwrap_or_else(names::random_nick);
         if let Some(c) = s("colour") {
@@ -916,6 +918,13 @@ async fn serve_lines(mut lines: tokio::sync::mpsc::UnboundedReceiver<String>) {
             Some("quit") => {
                 emit(json!({"t": "bye"}));
                 return;
+            }
+            // A new room's id and password, made up as start makes them, for a program to show
+            // before the room opens and let its user change.
+            Some("suggest") => {
+                if !emit(json!({"t": "suggest", "room": names::random_room_id(), "password": names::random_password()})) {
+                    return;
+                }
             }
             Some("start") => {
                 let cfg = match st.start_config(&v) {
