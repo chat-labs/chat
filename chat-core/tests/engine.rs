@@ -4,7 +4,7 @@
 
 mod sim;
 
-use chat_core::{Command, Delivery, Event, LeaveReason, Outcome};
+use chat_core::{Command, Delivery, Event, LeaveReason, Outcome, Queued};
 use sim::{Net, config};
 
 /// Two nodes in one room, the second given the first's address.
@@ -97,6 +97,57 @@ fn messages_pass_through_a_peer_in_the_middle() {
     assert_eq!(m.from, net.nodes[a].id());
     assert_eq!(m.peer, Some(net.nodes[b].id()));
     assert!(m.name.starts_with("alice#"));
+}
+
+/// The messages a node's call has waiting for its peer, as it last said.
+fn waiting(net: &Net, i: usize) -> Option<Vec<String>> {
+    net.nodes[i].events.iter().rev().find_map(|e| match e {
+        Event::Outbox { messages } => Some(messages.iter().map(|m| m.text.clone()).collect()),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_call_keeps_what_waits_for_its_peer() {
+    let mut net = Net::new();
+    let mut a = config("alice");
+    a.call = true;
+    a.outbox = vec![Queued {
+        mid: "0a1b2c3d".into(),
+        text: "from yesterday".into(),
+        at: 1_799_990_000,
+    }];
+    let a = net.add(a);
+    assert_eq!(waiting(&net, a), Some(vec!["from yesterday".to_string()]));
+    // Nobody has answered and nobody's here: it waits for them rather than failing.
+    match net
+        .send(
+            a,
+            Command::Send {
+                text: "are you there?".into(),
+            },
+        )
+        .unwrap()
+    {
+        Outcome::Sent { to, .. } => assert_eq!(to, 0),
+        other => panic!("not sent: {other:?}"),
+    }
+    assert_eq!(waiting(&net, a).map(|w| w.len()), Some(2));
+    let mut b = config("bob");
+    b.call = true;
+    b.static_peers = vec![net.nodes[a].addr()];
+    let b = net.add(b);
+    net.run_until(60.0, "bob gets what waited", |n| {
+        n.nodes[b].received("from yesterday").is_some() && n.nodes[b].received("are you there?").is_some()
+    });
+    net.run_until(15.0, "nothing waits once bob acks", |n| waiting(n, a) == Some(Vec::new()));
+    // Sent while he's here, it goes at once, and waits only until he acks it.
+    net.send(a, Command::Send { text: "got it".into() }).unwrap();
+    assert_eq!(waiting(&net, a).map(|w| w.len()), Some(1));
+    net.run_until(15.0, "acked", |n| {
+        n.nodes[b].received("got it").is_some() && waiting(n, a) == Some(Vec::new())
+    });
+    assert_eq!(net.nodes[b].messages().iter().filter(|m| m.body() == "from yesterday").count(), 1);
 }
 
 #[test]

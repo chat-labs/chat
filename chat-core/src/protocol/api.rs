@@ -194,6 +194,17 @@ impl Message {
     }
 }
 
+/// One of ours in a call that its peer hasn't acked yet: written while they were away, or sent
+/// and not acked. It goes when they're here, and a save keeps it so it goes after a restart too.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Queued {
+    pub mid: String,
+    /// The text as sent, a reply's quote first.
+    pub text: String,
+    /// Unix time it was written.
+    pub at: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
@@ -269,6 +280,10 @@ pub enum Event {
     Delivery {
         own: u64,
         delivery: Delivery,
+    },
+    /// A call's messages its peer hasn't acked changed: these wait for them, oldest first.
+    Outbox {
+        messages: Vec<Queued>,
     },
     PeerJoined(PeerInfo),
     /// A connected peer changed: its nick, colour, code, identity or path.
@@ -571,6 +586,8 @@ pub enum CommandError {
     Alone,
     #[error("there's nothing to send")]
     Empty,
+    #[error("{0} messages already wait for them: more can be sent once they're here")]
+    OutboxFull(usize),
     #[error("no connected peer has that id")]
     NoSuchPeer,
     #[error("{0}'s chat is too old for direct messages")]

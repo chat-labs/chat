@@ -656,8 +656,17 @@ impl App {
             .filter_map(|r| r.info.as_ref().map(|i| (i.room.clone(), i.password.clone())))
             .take(chat_core::net::settings::ROOMS_MAX)
             .collect();
-        if open != self.settings.reopen {
+        // A call by the key it's with: it opens that day's room.
+        let calls: Vec<[u8; 32]> = self
+            .rooms
+            .iter()
+            .filter(|r| r.room().is_some())
+            .filter_map(|r| r.call.as_ref().map(|c| c.0))
+            .take(chat_core::net::settings::ROOMS_MAX)
+            .collect();
+        if open != self.settings.reopen || calls != self.settings.calls {
             self.settings.reopen = open;
+            self.settings.calls = calls;
             self.autosave();
         }
     }
@@ -681,6 +690,49 @@ impl App {
         }
         for j in joins {
             self.join(&j);
+        }
+        if self.settings.on("reopen") {
+            self.reopen_calls();
+        }
+    }
+
+    /// The calls open last time, with keys still verified: each opens today's room.
+    fn reopen_calls(&mut self) {
+        let keys = self.settings.calls.clone();
+        if keys.is_empty() {
+            return;
+        }
+        let Some(ident) = self.ident.clone() else {
+            return self.fail("the calls kept to reopen need your signing identity - /identity, then /call");
+        };
+        let day = chat_core::protocol::names::contact_day(crate::text::unix_now());
+        for public in keys {
+            if self.rooms.iter().any(|r| r.call.as_ref().is_some_and(|c| c.0 == public)) {
+                continue;
+            }
+            let nick = match self.client.trust().lock() {
+                Ok(t) => t.verified().iter().find(|e| e.public == public).map(|e| e.nick.clone()),
+                Err(_) => None,
+            };
+            if let Some(nick) = nick
+                && let Err(e) = self.open_call(&ident, public, nick, day, None)
+            {
+                self.fail(e);
+            }
+        }
+    }
+
+    /// What waits to go to a call's peer, as the open save keeps it.
+    pub(crate) fn kept_outbox(&mut self, ident: &Ident, public: &[u8; 32], nick: &str) -> Vec<chat_core::Queued> {
+        let (Some(save), Some(id)) = (&self.save, ident.kp.contact_id(public)) else {
+            return Vec::new();
+        };
+        match save.outbox(&id) {
+            Ok(o) => o,
+            Err(_) => {
+                self.fail(format!("what waits to go to {nick} can't be read from your save"));
+                Vec::new()
+            }
         }
     }
 

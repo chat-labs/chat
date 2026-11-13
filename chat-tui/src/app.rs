@@ -97,6 +97,8 @@ pub struct RoomView {
     pub call: Option<([u8; 32], String, u64)>,
     /// Its history while it's kept, in the open save.
     pub history: Option<chat_core::net::history::History>,
+    /// A call's messages its peer hasn't acked, as the room last said.
+    pub outbox: Vec<chat_core::Queued>,
 }
 
 impl RoomView {
@@ -124,6 +126,7 @@ impl RoomView {
             move_later: None,
             call: None,
             history: None,
+            outbox: Vec::new(),
         }
     }
 
@@ -1051,12 +1054,24 @@ impl App {
             self.say(format!("the call with {nick} is open already"));
             return Ok(());
         }
-        self.open_call(&ident, public, nick, chat_core::protocol::names::contact_day(unix_now()))
+        self.open_call(&ident, public, nick, chat_core::protocol::names::contact_day(unix_now()), None)
     }
 
-    fn open_call(&mut self, ident: &Ident, public: [u8; 32], nick: String, day: u64) -> Result<(), String> {
+    /// `outbox`: what waits for them, carried from the last day's room; None reads it from the save.
+    pub(crate) fn open_call(
+        &mut self,
+        ident: &Ident,
+        public: [u8; 32],
+        nick: String,
+        day: u64,
+        outbox: Option<Vec<chat_core::Queued>>,
+    ) -> Result<(), String> {
         let (room, password) = chat_core::protocol::names::contact_room(&ident.kp, &public, day)
             .ok_or_else(|| format!("no room can be worked out with {nick}'s key"))?;
+        let outbox = match outbox {
+            Some(o) => o,
+            None => self.kept_outbox(ident, &public, &nick),
+        };
         // Only the verified key gets anything there, whatever else is set.
         let cfg = RoomConfig {
             room: Some(room),
@@ -1064,6 +1079,8 @@ impl App {
             invite: None,
             create: false,
             verify_required: true,
+            call: Some(public),
+            outbox,
             ..self.base.clone()
         };
         self.open(cfg, format!("@{nick}"));
@@ -1073,7 +1090,8 @@ impl App {
             Level::Note,
             format!(
                 "calling {nick}: a room only your signing key and theirs can work out, for today (UTC). They /call you \
-                 too, and nothing goes to anyone there but the key you verified"
+                 too, and nothing goes to anyone there but the key you verified. What you send while they're away \
+                 waits for them"
             ),
         );
         Ok(())
@@ -1091,13 +1109,14 @@ impl App {
             })
             .collect();
         for i in stale.into_iter().rev() {
+            self.write_history(self.rooms[i].id, true);
             let r = self.rooms.remove(i);
             if let Some(room) = r.room() {
                 room.leave().await;
             }
             let (public, nick, _) = r.call.expect("a call");
             let keep = self.current;
-            if self.open_call(&ident, public, nick, day).is_ok() {
+            if self.open_call(&ident, public, nick, day, Some(r.outbox)).is_ok() {
                 let last = self.rooms.len() - 1;
                 let moved = self.rooms.remove(last);
                 self.rooms.insert(i, moved);
@@ -1397,6 +1416,7 @@ impl App {
                 };
                 let Some(r) = self.by_id(id) else { return };
                 let mut bell = false;
+                let mut keep_outbox = None;
                 match event {
                     Event::Message(m) => {
                         // A direct message is for us, so it counts as a mention.
@@ -1448,6 +1468,10 @@ impl App {
                     },
                     Event::PeerLeft { id, .. } => r.peers.retain(|p| p.id != id),
                     Event::Timer { seconds, .. } => r.timer = seconds,
+                    Event::Outbox { messages } => {
+                        keep_outbox = r.info.as_ref().map(|i| (i.history_id, messages.clone()));
+                        r.outbox = messages;
+                    }
                     Event::Notice { level, text } => r.note(level, text),
                     Event::Log { text } => r.entries.push(Entry {
                         at: unix_now(),
@@ -1473,6 +1497,12 @@ impl App {
                 }
                 if bell {
                     let _ = std::io::stdout().write_all(b"\x07").and_then(|_| std::io::stdout().flush());
+                }
+                if let Some((hid, messages)) = keep_outbox
+                    && let Some(save) = &self.save
+                    && save.set_outbox(&hid, &messages).is_err()
+                {
+                    self.fail("couldn't keep what waits to go in your save - it still goes while chat runs");
                 }
             }
         }
@@ -2135,6 +2165,7 @@ impl App {
             "quitall" | "qa" | "qall" => {
                 // Leaves every room, keeping none to reopen.
                 self.settings.reopen.clear();
+                self.settings.calls.clear();
                 self.autosave();
                 self.quit_all = true;
                 self.quit = true;
@@ -2594,9 +2625,9 @@ impl App {
     pub fn quit_paras(&self) -> Vec<String> {
         let open: Vec<&RoomView> = self.rooms.iter().filter(|r| r.room().is_some()).collect();
         let n = open.len();
-        // As shutdown and remember_open keep them: calls find the day's room again instead.
+        // As shutdown and remember_open keep them, calls by the key they're with.
         let kept = match &self.save {
-            Some(_) if self.settings.on("reopen") => open.iter().filter(|r| r.call.is_none() && r.info.is_some()).count(),
+            Some(_) if self.settings.on("reopen") => open.iter().filter(|r| r.info.is_some()).count(),
             _ => 0,
         };
         let online: usize = open.iter().map(|r| r.peers.len()).sum();

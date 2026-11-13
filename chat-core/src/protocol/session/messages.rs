@@ -8,6 +8,10 @@
 //! A peer that times out may come back with the same id (its session kept running), so what it
 //! never acked is held for it a while, and sent again once it's back and trusted. The UI hears,
 //! peer by peer, when each of our messages arrived, and when nothing more will be heard.
+//!
+//! In a call, ours are kept until the peer acks them, in the outbox: what's written while they're
+//! away waits for them, and what they miss goes again once they're back. The UI hears what's in
+//! it ([`Event::Outbox`]) to keep it, and a call opened again starts with what it had.
 
 use super::peer::Pending;
 use super::*;
@@ -38,6 +42,16 @@ const RELAY_ROUND_TRIP: f64 = 4.0;
 const UDP_ROUND_TRIP: f64 = 1.0;
 /// The peers a held-back message names before it counts the rest.
 const HELD_NAMES: usize = 3;
+/// A call's messages waiting for its peer, at most.
+const OUTBOX_MAX: usize = 64;
+
+/// One of ours in a call, until its peer acks it.
+pub(super) struct Outgoing {
+    q: Queued,
+    own: u64,
+    /// Sent, and not missed since.
+    sending: bool,
+}
 
 /// A message's id: four random bytes, as hex.
 pub(super) fn gen_mid() -> String {
@@ -210,8 +224,12 @@ impl Session {
         if line.is_empty() {
             return Err(CommandError::Empty);
         }
-        if !self.ready() {
+        // A call's message waits for its peer, so it needs nobody to have answered.
+        if !self.ready() && !self.call {
             return Err(CommandError::NotOpen);
+        }
+        if self.call && self.outbox.len() >= OUTBOX_MAX {
+            return Err(CommandError::OutboxFull(OUTBOX_MAX));
         }
         let mid = gen_mid();
         self.seen_add(&mid);
@@ -255,12 +273,25 @@ impl Session {
         if to > 0 {
             self.check_settled(own);
         }
+        if self.call {
+            // Sent again later as a plain message, so a reply's quote goes in front.
+            let text = text::clean_str(&format!("{prefix}{line}"), MAX_TEXT);
+            let q = Queued {
+                mid: mid.clone(),
+                text,
+                at: self.unix,
+            };
+            self.outbox.push(Outgoing { q, own, sending: to > 0 });
+            self.outbox_changed();
+        }
         if !held.is_empty() {
             let mut names = held.iter().take(HELD_NAMES).cloned().collect::<Vec<_>>().join(", ");
             if held.len() > HELD_NAMES {
                 names.push_str(" and others");
             }
             self.note(format!("not sent to {names}: compare verify codes first"));
+        } else if to == 0 && self.call {
+            self.note("they aren't here: it waits for them, and goes once they are");
         } else if to == 0 {
             self.note("nobody else is here yet, message not delivered");
         }
@@ -357,6 +388,17 @@ impl Session {
             }
         }
         track.waiting.remove(peer);
+        if !acked
+            && self.call
+            && let Some(o) = self.outbox.iter_mut().find(|o| o.own == own)
+        {
+            // Not missed: it waits for them to be back.
+            o.sending = false;
+            if self.own.get(&own).is_some_and(|t| t.waiting.is_empty()) {
+                self.own.remove(&own);
+            }
+            return;
+        }
         let delivery = if acked {
             Delivery::Delivered {
                 peer: PeerId(*peer),
@@ -369,7 +411,69 @@ impl Session {
             }
         };
         self.events.push_back(Event::Delivery { own, delivery });
+        if acked && let Some(i) = self.outbox.iter().position(|o| o.own == own) {
+            self.outbox.remove(i);
+            self.outbox_changed();
+        }
         self.check_settled(own);
+    }
+
+    fn outbox_changed(&mut self) {
+        let messages = self.outbox.iter().map(|o| o.q.clone()).collect();
+        self.events.push_back(Event::Outbox { messages });
+    }
+
+    /// What waited for a call's peer when it was last open waits again.
+    pub(super) fn restore_outbox(&mut self, list: Vec<Queued>) {
+        if !self.call || list.is_empty() {
+            return;
+        }
+        for q in list.into_iter().take(OUTBOX_MAX) {
+            self.seen_add(&q.mid);
+            self.own_seq += 1;
+            let own = self.own_seq;
+            self.outbox.push(Outgoing { q, own, sending: false });
+        }
+        let n = self.outbox.len();
+        self.note(if n == 1 {
+            "a message from before waits for them, and goes once they're here".to_string()
+        } else {
+            format!("{n} messages from before wait for them, and go once they're here")
+        });
+        self.outbox_changed();
+    }
+
+    /// A call's messages that wait go once its peer is here and trusted, oldest first.
+    pub(super) fn deliver_outbox(&mut self) {
+        if self.outbox.iter().all(|o| o.sending) {
+            return;
+        }
+        let slots: Vec<usize> = self
+            .live()
+            .into_iter()
+            .filter(|&s| self.peer(s).announced && self.trusted(self.peer(s)))
+            .collect();
+        let Some(&first) = slots.first() else { return };
+        let (my_idhex, nick) = (self.my_idhex.clone(), self.nick.clone());
+        let mut went = 0;
+        for i in 0..self.outbox.len() {
+            let o = &self.outbox[i];
+            if o.sending {
+                continue;
+            }
+            let (mid, text, own) = (o.q.mid.clone(), o.q.text.clone(), o.own);
+            for &slot in &slots {
+                self.send_message(slot, &mid, &my_idhex, &nick, &text, Some(own));
+            }
+            self.outbox[i].sending = true;
+            went += 1;
+        }
+        let name = self.peer_name(first);
+        self.note(if went == 1 {
+            format!("{name} is here: the message that waited for them went")
+        } else {
+            format!("{name} is here: the {went} messages that waited for them went")
+        });
     }
 
     /// A peer never acked our message `own` (any of its parts).

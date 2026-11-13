@@ -104,6 +104,11 @@ pub struct SessionConfig {
     pub moved: Option<IdentityKeypair>,
     /// This program's build, told to peers in "v" (None: its executable couldn't be read).
     pub build: Option<Build>,
+    /// A call's room, which only its one verified peer can be in: what we send while they're
+    /// away waits for them, and what they haven't acked is kept ([`Event::Outbox`]).
+    pub call: bool,
+    /// What waited for them when the call was last open.
+    pub outbox: Vec<Queued>,
 }
 
 /// A build as peers are told it: its version, its executable's SHA-256 (without the list a release
@@ -138,6 +143,8 @@ impl SessionConfig {
             dht_v6: true,
             nostr: NostrMode::Fallback,
             relays: 0,
+            call: false,
+            outbox: Vec::new(),
             static_peers: Vec::new(),
             rekey_interval: 300.0,
             file_limit: 0,
@@ -311,6 +318,8 @@ pub struct Session {
     ignored: VecDeque<[u8; 16]>,
     held: HashMap<[u8; 16], Held>,
     own: HashMap<u64, OwnTrack>,
+    call: bool,
+    outbox: Vec<messages::Outgoing>,
     reasm: Reassembly,
     probe: Bucket,
     ck: Bucket,
@@ -419,6 +428,8 @@ impl Session {
             ignored: VecDeque::new(),
             held: HashMap::new(),
             own: HashMap::new(),
+            call: cfg.call,
+            outbox: Vec::new(),
             reasm: Reassembly::default(),
             probe: Bucket::new(PROBE_BURST, now.secs),
             ck: Bucket::new(CK_BURST, now.secs),
@@ -464,6 +475,7 @@ impl Session {
             s.requests.push_back(Request::TorHostRoom { slot: Some(0) });
         }
         s.emit_timer_if_changed();
+        s.restore_outbox(cfg.outbox);
         s
     }
 

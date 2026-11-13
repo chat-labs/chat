@@ -67,7 +67,7 @@ pub const COMMANDS: &[Command] = &[
         "call",
         &[],
         "NICK",
-        "open the room only you and a verified key can work out; they /call you too",
+        "open the room only you and a verified key can work out; they /call you too, and what you send while they're away waits for them",
     ),
     c("quitall", &["qa", "qall"], "", "leave every room and quit, kept ones too"),
     c("lock", &[], "", "lock the screen until the save's passphrase, or a PIN, unlocks it"),

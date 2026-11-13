@@ -14,6 +14,7 @@
 //! These calls block (Argon2id takes seconds and 512 MiB), so an async caller runs them on a
 //! blocking thread.
 
+use crate::protocol::api::Queued;
 use crate::protocol::crypto::identity::{IdentityKeypair, IdentityKind};
 use crate::protocol::crypto::passlock::{self, NEEDS_CODE, NEEDS_DEVICE, NEEDS_KEY, PassError, PassLock, SEAL_OVERHEAD, TOTP_SECRET_LEN};
 use crate::protocol::crypto::sodium;
@@ -38,6 +39,8 @@ const CACHE: &str = "cache";
 const OLD_DECOY: [&str; 4] = ["shadow-settings", "shadow-key", "shadow-verified", "shadow-authenticator"];
 const SEALED: [&str; 5] = [SETTINGS, KEY, VERIFIED, CODE, SPARE_LOCK];
 const HISTORY_PREFIX: &str = "history-";
+/// A call's messages that wait for its peer, by the call's contact id.
+const OUTBOX_PREFIX: &str = "outbox-";
 pub const HISTORY_ID_LEN: usize = 16;
 const SAVES_DIR: &str = "saves";
 const DEVICE_SEALED_MAX: usize = 8192;
@@ -52,6 +55,8 @@ pub const SETTINGS_MAX: usize = 20480;
 pub const KEY_MAX: usize = 1280;
 pub const VERIFIED_MAX: usize = 24576;
 pub const HISTORY_MAX: usize = 256 * 1024;
+/// A call keeps 64 messages waiting at most, each well under 1 KB.
+pub const OUTBOX_MAX: usize = 64 * 1024;
 pub const TOR_MAX: usize = 64 * 1024 * 1024;
 const CODE_PLAIN_LEN: usize = 1 + TOTP_SECRET_LEN;
 /// The spare: 1, whether the decoy asks for a code, and the code's secret.
@@ -72,6 +77,7 @@ fn file_max(file: &str) -> usize {
             KEY => KEY_MAX,
             CODE => CODE_PLAIN_LEN,
             f if f.starts_with(HISTORY_PREFIX) => HISTORY_MAX,
+            f if f.starts_with(OUTBOX_PREFIX) => OUTBOX_MAX,
             _ => VERIFIED_MAX,
         }
 }
@@ -226,18 +232,57 @@ fn read_sealed(dir: &Path, file: &str) -> Result<Vec<u8>> {
     read_file(&dir.join(file), file_max(file))
 }
 
-fn histories(dir: &Path) -> Vec<String> {
+/// What's kept for rooms, by their history ids: histories, and calls' outboxes.
+fn room_files(dir: &Path) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
     rd.filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.starts_with(HISTORY_PREFIX) && n.len() == HISTORY_PREFIX.len() + 2 * HISTORY_ID_LEN)
-        .take(HISTORIES_MAX)
+        .filter(|n| {
+            [HISTORY_PREFIX, OUTBOX_PREFIX]
+                .iter()
+                .any(|p| n.starts_with(p) && n.len() == p.len() + 2 * HISTORY_ID_LEN)
+        })
+        .take(2 * HISTORIES_MAX)
         .collect()
+}
+
+fn histories(dir: &Path) -> Vec<String> {
+    room_files(dir).into_iter().filter(|n| n.starts_with(HISTORY_PREFIX)).collect()
 }
 
 fn history_file(id: &[u8; HISTORY_ID_LEN]) -> String {
     format!("{HISTORY_PREFIX}{}", hex::encode(id))
+}
+
+fn outbox_file(id: &[u8; HISTORY_ID_LEN]) -> String {
+    format!("{OUTBOX_PREFIX}{}", hex::encode(id))
+}
+
+/// An outbox as its file has it: a line for each message, "AT\tMID\tTEXT".
+fn outbox_text(messages: &[Queued]) -> Zeroizing<Vec<u8>> {
+    let mut out = Zeroizing::new(Vec::new());
+    for m in messages {
+        let text = m.text.replace(['\t', '\n', '\r'], " ");
+        out.extend_from_slice(format!("{}\t{}\t{text}\n", m.at, m.mid).as_bytes());
+    }
+    out
+}
+
+/// The messages an outbox file has, skipping any that can't be read.
+fn outbox_read(text: &[u8]) -> Vec<Queued> {
+    String::from_utf8_lossy(text)
+        .split('\n')
+        .filter_map(|l| {
+            let mut f = l.splitn(3, '\t');
+            let (at, mid, text) = (f.next()?.parse().ok()?, f.next()?, f.next()?);
+            (!mid.is_empty() && !text.is_empty()).then(|| Queued {
+                mid: mid.to_string(),
+                text: text.to_string(),
+                at,
+            })
+        })
+        .collect()
 }
 
 /// What the save's sealed files but one need, read from their headers.
@@ -630,7 +675,7 @@ impl Saves {
             .flat_map(|f| [f.to_string(), format!("{f}.new")])
             .collect();
         files.push(format!("{DEVICE}.new"));
-        files.extend(histories(&dir));
+        files.extend(room_files(&dir));
         let mut left = false;
         for f in &files {
             let p = dir.join(f);
@@ -700,7 +745,7 @@ fn promote(dir: &Path, sl: &PassLock, spare_plain: &[u8], old: bool) {
             let _ = std::fs::remove_file(dir.join(CODE));
         }
     }
-    for h in histories(dir) {
+    for h in room_files(dir) {
         let _ = std::fs::remove_file(dir.join(h));
     }
     let _ = std::fs::remove_file(dir.join(CACHE));
@@ -923,6 +968,32 @@ impl Save {
         }
     }
 
+    /// What waits to go to a call's peer, by the call's history id.
+    pub fn outbox(&self, id: &[u8; HISTORY_ID_LEN]) -> Result<Vec<Queued>> {
+        match self.read(&outbox_file(id)) {
+            Err(SaveError::NoFile) => Ok(Vec::new()),
+            r => r.map(|t| outbox_read(&t)),
+        }
+    }
+
+    /// Keeps what waits to go to a call's peer: with nothing, its file goes.
+    pub fn set_outbox(&self, id: &[u8; HISTORY_ID_LEN], messages: &[Queued]) -> Result<()> {
+        let file = outbox_file(id);
+        if messages.is_empty() {
+            return match std::fs::remove_file(self.dir.join(&file)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Err(SaveError::Failed(format!("couldn't delete its {file} file: {e}")))
+                }
+                _ => Ok(()),
+            };
+        }
+        let text = outbox_text(messages);
+        if text.len() > OUTBOX_MAX {
+            return Err(SaveError::Failed("too much waits to go to them to save".into()));
+        }
+        self.write(&file, &text)
+    }
+
     /// How many rooms' histories it keeps.
     pub fn history_count(&self) -> usize {
         histories(&self.dir).len()
@@ -1101,7 +1172,7 @@ impl Save {
     /// Opened with its own passphrase, a save is written just as when its decoy takes its place:
     /// every sealed file and the spare, so the files' times don't say which passphrase opened it.
     fn refresh(&mut self) {
-        for f in SEALED.iter().map(|f| f.to_string()).chain(histories(&self.dir)) {
+        for f in SEALED.iter().map(|f| f.to_string()).chain(room_files(&self.dir)) {
             if let Ok(b) = read_file(&self.dir.join(&f), file_max(&f))
                 && !b.is_empty()
             {
@@ -1338,7 +1409,7 @@ impl Save {
             .iter()
             .map(|f| f.to_string())
             .filter(|f| f != first && !(f == CODE && target & NEEDS_CODE == 0));
-        for f in rest.chain(histories(&self.dir)) {
+        for f in rest.chain(room_files(&self.dir)) {
             if !self.reseal(&f, &next)? {
                 skipped += 1;
             }
@@ -1541,6 +1612,19 @@ mod tests {
         save.set_settings("[profile]\nnick = \"alice\"\n").unwrap();
         save.set_key(b"secret key").unwrap();
         save.set_history(&[7; 16], b"line").unwrap();
+        let waiting = vec![
+            Queued {
+                mid: "0a1b2c3d".into(),
+                text: "see you\tat 5".into(),
+                at: 1_800_000_000,
+            },
+            Queued {
+                mid: "4e5f6a7b".into(),
+                text: "> you: hi\nback".into(),
+                at: 1_800_000_060,
+            },
+        ];
+        save.set_outbox(&[7; 16], &waiting).unwrap();
         assert_eq!(
             std::fs::metadata(s.top.join(SETTINGS)).unwrap().len() as usize,
             SETTINGS_PAD + SEAL_OVERHEAD
@@ -1552,6 +1636,15 @@ mod tests {
         assert_eq!(&save.key().unwrap().unwrap()[..], b"secret key");
         assert_eq!(&save.history(&[7; 16]).unwrap().unwrap()[..], b"line");
         assert!(save.history(&[8; 16]).unwrap().is_none());
+        let back = save.outbox(&[7; 16]).unwrap();
+        assert_eq!((back[0].text.as_str(), back[1].text.as_str()), ("see you at 5", "> you: hi back"));
+        assert_eq!((back[1].mid.as_str(), back[1].at), ("4e5f6a7b", 1_800_000_060));
+        assert!(save.outbox(&[8; 16]).unwrap().is_empty());
+        // Forgetting histories leaves what waits to go; nothing waiting leaves no file.
+        save.forget_history(None);
+        assert_eq!(save.outbox(&[7; 16]).unwrap().len(), 2);
+        save.set_outbox(&[7; 16], &[]).unwrap();
+        assert!(!s.top.join(outbox_file(&[7; 16])).exists());
         assert_eq!(open(&s, "default", "nope").err(), Some(SaveError::Wrong));
         assert!(s.dir("nope/../x", false).is_err());
         s.remove("default").unwrap();

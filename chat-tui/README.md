@@ -59,7 +59,9 @@ chat --help               # every option
   takes one pasted in. Once someone has verified you (`/verify`), they needn't compare codes with
   you again, in any room. `/verified` lists the keys you verified.
 - `/call NICK` opens a room only you and NICK (a key you verified) can work out, for today; they
-  `/call` you too.
+  `/call` you too. What you send while they're away waits for them (sealed in your save, if one's
+  open) and goes once they're back, its history carries on from day to day, and `/set reopen on`
+  opens it again next time.
 - `/move` takes the people whose codes you compared to a new room with a new password, and leaves
   everyone else behind; each is asked first. Codes compared here still count there.
 - `/install` saves your settings, signing key and verified keys on this computer, sealed with a

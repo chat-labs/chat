@@ -125,9 +125,12 @@ builds for musl: it needs `rustup target add x86_64-unknown-linux-musl` and a mu
 - Signing identities as AGE or PGP keys: made here, made from a password with this device's id
   (and the nick), or read from a key file. PGP keys are exported and imported as armored v4 EdDSA
   keys, and a password gives the same key deterministically.
-  Calls (`:call`): the room only two verified keys can work out, for one day.
+  Calls (`:call`): the room only two verified keys can work out, for one day. What's sent in one
+  while the peer is away waits for them in its outbox (`Event::Outbox`, kept by a save), and goes
+  once they're back; its history is named by the two keys, so it's the same every day.
 - Invites as QR codes (in `ready` and `moved`).
-- Saves (`net::saves`): settings, the signing key, verified keys, room histories and Tor's state,
+- Saves (`net::saves`): settings, the signing key, verified keys, room histories, calls' outboxes
+  and Tor's state,
   each file sealed under one passphrase (Argon2id, 512 MiB, then XChaCha20-Poly1305) in
   `~/.config/chat` (`saves/NAME` for more than one). A save can ask for an authenticator app's
   code too, delete itself after 3, 5 or 10 wrong passphrases in a row, and have a shadow
