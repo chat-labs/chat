@@ -68,6 +68,7 @@ impl Session {
         self.move_tick();
         self.run_slots();
         self.deliver_held();
+        self.deliver_outbox();
         self.lonely_hint();
         self.emit_timer_if_changed();
         let net = self.net_status();

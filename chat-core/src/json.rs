@@ -418,6 +418,11 @@ impl State {
             cfg.room = Some(room);
             cfg.password = Some(password);
             self.call_day = Some(day);
+            cfg.call = Some(their);
+            // What waited for them, as "outbox" said it when the call was last open.
+            if let Some(o) = v.get("outbox") {
+                cfg.outbox = serde_json::from_value(o.clone()).map_err(|e| format!("outbox: {e}"))?;
+            }
             cfg.invite = None;
             cfg.create = false;
             cfg.verify_required = true;
@@ -652,6 +657,7 @@ impl State {
                 self.say_peers(room, false).await && self.say_lists_if_changed()
             }
             Event::Timer { seconds, who } => emit(json!({"t": "timer", "seconds": seconds, "who": who})),
+            Event::Outbox { messages } => emit(json!({"t": "outbox", "messages": messages})),
             Event::Net(n) => self.say_net(&n, false),
             Event::Opened => true,
             Event::Files { list } => self.say_files(&list, room.info().me, false),

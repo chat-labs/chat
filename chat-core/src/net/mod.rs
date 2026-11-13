@@ -25,7 +25,7 @@ pub mod update;
 use crate::protocol::crypto::RoomKeys;
 use crate::protocol::session::SessionConfig;
 use crate::protocol::{
-    Command, CommandError, Event, FileInfo, NetLog, NetStatus, NostrMode, Outcome, PeerId, PeerInfo, RouteMode,
+    Command, CommandError, Event, FileInfo, NetLog, NetStatus, NostrMode, Outcome, PeerId, PeerInfo, Queued, RouteMode,
     crypto::identity::{IdentityKeypair, IdentityKind},
     names::Colour,
     trust::{SharedTrust, TrustStore},
@@ -163,6 +163,11 @@ pub struct RoomConfig {
     /// Moved here from another room (:move): the key shown there, and that room's id.
     #[serde(skip)]
     pub moved: Option<(IdentityKeypair, String)>,
+    /// A call: the verified key it's with. What we send while they're away waits for them, and
+    /// the room's history id is the same every day (with an identity, its contact id).
+    pub call: Option<[u8; 32]>,
+    /// A call's messages that waited for them when it was last open ([`Event::Outbox`]).
+    pub outbox: Vec<Queued>,
 }
 
 impl RoomConfig {
@@ -202,8 +207,8 @@ pub struct RoomInfo {
     pub verify_required: bool,
     /// The room :move brought us here from.
     pub moved_from: Option<String>,
-    /// What a save names this room's history by: worked out from its id and password, so the
-    /// name doesn't say which room it is.
+    /// What a save names this room's history by (and a call's outbox): worked out from its id and
+    /// password, or a call's two keys, so the name doesn't say which room it is.
     #[serde(skip)]
     pub history_id: [u8; 16],
 }
@@ -470,6 +475,8 @@ impl Client {
         sc.file_limit = cfg.files.limit;
         sc.fast_files = cfg.files.fast;
         sc.moved = cfg.moved.as_ref().map(|(key, _)| key.clone());
+        sc.call = cfg.call.is_some();
+        sc.outbox = cfg.outbox.clone();
         sc.build = update::self_build().cloned();
 
         let clock = Clock::new();
@@ -491,7 +498,12 @@ impl Client {
             history: session.keeps_history(),
             verify_required: session.verify_required(),
             moved_from: cfg.moved.as_ref().map(|(_, from)| from.clone()),
-            history_id: session.history_id(),
+            // A call's, by the two keys rather than the day's room, so it's the same every day.
+            history_id: cfg
+                .call
+                .zip(cfg.identity.as_ref())
+                .and_then(|(theirs, (_, kp))| kp.contact_id(&theirs))
+                .unwrap_or_else(|| session.history_id()),
         };
         let (relay_tx, relay_rx) = mpsc::unbounded_channel();
         let (log_tx, net_log) = mpsc::unbounded_channel();

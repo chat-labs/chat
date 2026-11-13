@@ -15,6 +15,14 @@ chat's JSON interface.
   sets it as it starts; chat-json's is chat-core's.
 - chat-json's `suggest`, before `start`: a new room's id and password, made up as `start`
   makes them, for a program to show and let its user change.
+- A call keeps what's sent while its peer is away, and what they haven't acked, in an outbox,
+  and sends it once they're back and trusted (`RoomConfig::call`, `RoomConfig::outbox`,
+  `Event::Outbox`, `CommandError::OutboxFull`; up to 64 messages). A save keeps it sealed
+  (`Save::outbox`, `Save::set_outbox`), and chat-json says it in `outbox` and takes it back in
+  `start`'s `outbox`, with `call`.
+- A call's history id comes from the two keys (`IdentityKeypair::contact_id`) rather than the
+  day's room, so its history is the same from one day to the next.
+- Settings keep the calls to reopen, by the verified key each is with (`[calls]`).
 
 ### Changed
 

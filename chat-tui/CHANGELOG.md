@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A call is a lasting direct conversation now: what you send while they're away waits for them,
+  sealed in your save, and goes once they're back, after a restart too. Its history carries on
+  from one day to the next, and with /set reopen on, the calls you had open open again.
+
 ## 0.7.0-beta.1
 
 ### Changed

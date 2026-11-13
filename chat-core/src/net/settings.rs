@@ -4,7 +4,8 @@
 //! them, and as a save keeps them: TOML, inside its sealed settings file. Only rows that differ from
 //! their defaults are saved, so a later version's new default still reaches you; `routing` is
 //! always saved, so the file means the same wherever it's read. The kept rooms (`[rooms]`), the
-//! sessions to reopen (`[open]`) and the ignored keys (`[ignored]`) go in the same file.
+//! sessions to reopen (`[open]`), the calls to reopen (`[calls]`, by the verified key each is
+//! with) and the ignored keys (`[ignored]`) go in the same file.
 
 use crate::net::{Bridges, Route};
 use crate::protocol::api::{NetLog, NostrMode, RouteMode};
@@ -144,6 +145,8 @@ pub struct Settings {
     pub rooms: Vec<KeptRoom>,
     /// Sessions open when the save was last written, to open again (id, password).
     pub reopen: Vec<(String, String)>,
+    /// Calls open then, by the verified key each is with: they open the day's room.
+    pub calls: Vec<[u8; 32]>,
     pub ignored: Vec<TrustEntry>,
 }
 
@@ -153,6 +156,7 @@ impl Default for Settings {
             rows: DEFS.iter().map(|d| d.default.to_string()).collect(),
             rooms: Vec::new(),
             reopen: Vec::new(),
+            calls: Vec::new(),
             ignored: Vec::new(),
         }
     }
@@ -319,6 +323,8 @@ impl Settings {
         });
         entries("rooms", rooms.collect());
         entries("open", self.reopen.iter().map(|(id, pw)| vec![id.as_str(), pw.as_str()]).collect());
+        let calls: Vec<String> = self.calls.iter().map(|k| hex::encode(k)).collect();
+        entries("calls", calls.iter().map(|k| vec![k.as_str()]).collect());
         let hexes: Vec<String> = self.ignored.iter().map(|e| hex::encode(&e.public)).collect();
         let ignored = self
             .ignored
@@ -410,6 +416,13 @@ impl Settings {
                     Ok(())
                 }
                 _ => Err(format!("session to reopen {key:.10} can't be read - left out")),
+            },
+            "calls" => match strings(&v).filter(|r| r.len() == 1).and_then(|r| hex::decode_array::<32>(&r[0])) {
+                Some(k) if self.calls.len() < ROOMS_MAX && !self.calls.contains(&k) => {
+                    self.calls.push(k);
+                    Ok(())
+                }
+                _ => Err(format!("call to reopen {key:.10} can't be read - left out")),
             },
             "ignored" => {
                 let e = strings(&v).filter(|r| r.len() == 3).and_then(|r| {
@@ -794,7 +807,7 @@ pub const PAGE: &[PageRow] = &[
         group: None,
         label: "Reopen sessions",
         values: "on|off",
-        help: "on: keeps the sessions you have open, their ids and passwords sealed in the save that's open (so it needs :install), and opens them again when chat starts. Ctrl+C then quits without leaving them: peers see you go offline, or leave on older versions. :leave leaves one for good, :quitall every one. Calls aren't kept. Only the full-screen UI keeps them.",
+        help: "on: keeps the sessions you have open, their ids and passwords sealed in the save that's open (so it needs :install), and opens them again when chat starts. Ctrl+C then quits without leaving them: peers see you go offline, or leave on older versions. :leave leaves one for good, :quitall every one. Calls are kept by the key they're with, and open that day's room. Only the full-screen UI keeps them.",
     },
     PageRow {
         name: "filelimit",
@@ -1238,6 +1251,7 @@ mod tests {
             at_start: true,
         });
         s.reopen.push(("P3W8C6NHVA".into(), "plum orbit".into()));
+        s.calls.push([9; 32]);
         s.ignored.push(TrustEntry {
             kind: IdentityKind::Age,
             public: [5; 32],
@@ -1252,7 +1266,9 @@ mod tests {
                  [chat]\nfilelimit = \"64M\"\nnotify = \"all\"\nport = 4444\n\n\
                  [rooms]\n1 = [\"book \\\"club\\\"\", \"K7M2Q9XRT4\", \"correct horse\", \"start\"]\n\n\
                  [open]\n1 = [\"P3W8C6NHVA\", \"plum orbit\"]\n\n\
+                 [calls]\n1 = [\"{}\"]\n\n\
                  [ignored]\n1 = [\"age\", \"{}\", \"mallory\"]\n",
+                "09".repeat(32),
                 "05".repeat(32)
             )
         );

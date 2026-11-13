@@ -260,6 +260,17 @@ impl IdentityKeypair {
     /// A secret only the holders of this key and theirs can work out, for a call's room: X25519
     /// between the keys taken as points, hashed with a label, both keys (lower first) and the day.
     pub fn contact_secret(&self, their_pub: &[u8; SIGN_PUB_LEN], day: u64) -> Option<Zeroizing<[u8; 64]>> {
+        self.contact_hash(their_pub, b"chat-contact-v1", &day.to_be_bytes())
+    }
+
+    /// What a save names what it keeps of the calls with this key (their history, and what waits
+    /// to go to them): the same every day, and only the two keys' holders can work it out.
+    pub fn contact_id(&self, their_pub: &[u8; SIGN_PUB_LEN]) -> Option<[u8; 16]> {
+        let h = self.contact_hash(their_pub, b"chat-contact-kept-v1", &[])?;
+        Some(h[..16].try_into().expect("16 bytes"))
+    }
+
+    fn contact_hash(&self, their_pub: &[u8; SIGN_PUB_LEN], label: &[u8], extra: &[u8]) -> Option<Zeroizing<[u8; 64]>> {
         if sodium::ct_eq(&self.public, their_pub) {
             return None;
         }
@@ -272,7 +283,7 @@ impl IdentityKeypair {
             (their_pub, &self.public)
         };
         let mut out = Zeroizing::new([0u8; 64]);
-        sodium::blake2b(&mut out[..], &shared[..], &[b"chat-contact-v1", lo, hi, &day.to_be_bytes()]);
+        sodium::blake2b(&mut out[..], &shared[..], &[label, lo, hi, extra]);
         Some(out)
     }
 }
@@ -377,5 +388,11 @@ mod tests {
         assert_eq!(*ab, *ba);
         assert_ne!(*ab, *a.contact_secret(&b.public, 20001).unwrap());
         assert!(a.contact_secret(&a.public, 1).is_none());
+        // The same every day, for both, and nothing like the day's secret.
+        let id = a.contact_id(&b.public).unwrap();
+        assert_eq!(id, b.contact_id(&a.public).unwrap());
+        assert_ne!(id[..], ab[..16]);
+        assert_ne!(id, a.contact_id(&IdentityKeypair::generate().public).unwrap());
+        assert!(a.contact_id(&a.public).is_none());
     }
 }
